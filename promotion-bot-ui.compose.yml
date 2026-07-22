@@ -1,0 +1,25 @@
+---
+services:
+  promotion-bot-ui-backend:
+    build:
+      context: ./promotion-bot-ui/backend
+      dockerfile: Dockerfile
+    container_name: promotion-bot-ui-backend
+    restart: unless-stopped
+    ports:
+      - 3333:3001
+
+  promotion-bot-ui-frontend:
+    build:
+      context: ./promotion-bot-ui/frontend
+      dockerfile: Dockerfile
+    container_name: promotion-bot-ui-frontend
+    restart: unless-stopped
+    ports:
+      - 3334:80
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.promotion-bot.rule=Host(`promotion-bot.aiesecmoscow.whaleharbor.net`)"
+      - "traefik.http.routers.promotion-bot.entrypoints=websecure"
+      - "traefik.http.routers.promotion-bot.tls.certresolver=myresolver"
+      - "traefik.http.services.promotion-bot.loadbalancer.server.port=80"
