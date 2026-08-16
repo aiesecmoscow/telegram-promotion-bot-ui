@@ -1,8 +1,12 @@
 import { useState, useEffect } from 'react';
-import { ChevronLeftIcon } from '@heroicons/react/24/outline';
-import { sendCode, signIn, createJob } from './api';
+import {
+  ChevronLeftIcon,
+  EyeIcon,
+  EyeSlashIcon,
+} from '@heroicons/react/24/outline';
+import { sendCode, signIn, createJob, AuthError } from './api';
 
-type Page = 'login' | 'verify' | 'main';
+type Page = 'login' | 'verify' | 'password' | 'main';
 
 function App() {
   const [page, setPage] = useState<Page>('login');
@@ -12,9 +16,10 @@ function App() {
   // Login
   const [phone, setPhone] = useState('');
 
-  // Verify
+  // Verify / Password
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [tempSession, setTempSession] = useState('');
 
@@ -61,13 +66,46 @@ function App() {
         phone_code_hash: phoneCodeHash,
         phone_number: phone,
         verification_code: code,
-        password: password || undefined,
       });
       localStorage.setItem('tg_session', res.session_string);
       setSession(res.session_string);
       setPage('main');
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
+      if (e instanceof AuthError && e.code === 'password_required') {
+        setPage('password');
+      } else {
+        setError(e instanceof Error ? e.message : 'Unknown error');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmitPassword = async () => {
+    setError('');
+    if (!tempSession || !phoneCodeHash) {
+      setError('Session expired. Please go back and request a new code.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await signIn({
+        session_string: tempSession,
+        phone_code_hash: phoneCodeHash,
+        phone_number: phone,
+        verification_code: code,
+        password,
+      });
+      localStorage.setItem('tg_session', res.session_string);
+      setSession(res.session_string);
+      setPassword('');
+      setPage('main');
+    } catch (e: unknown) {
+      if (e instanceof AuthError && e.code === 'invalid_password') {
+        setError('Invalid password. Please try again.');
+      } else {
+        setError(e instanceof Error ? e.message : 'Unknown error');
+      }
     } finally {
       setLoading(false);
     }
@@ -201,17 +239,6 @@ function App() {
                 onChange={(e) => setCode(e.target.value)}
               />
             </label>
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">2FA Password (optional)</span>
-              </div>
-              <input
-                type="password"
-                className="input input-bordered w-full"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </label>
             <button
               className="btn btn-primary w-full"
               onClick={handleSignIn}
@@ -221,6 +248,63 @@ function App() {
                 !tempSession ||
                 !phoneCodeHash
               }
+            >
+              {loading ? (
+                <span className="loading loading-spinner loading-md"></span>
+              ) : (
+                'Login'
+              )}
+            </button>
+          </div>
+        )}
+
+        {page === 'password' && (
+          <div className="flex flex-col gap-4">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
+              onClick={handleBackToLogin}
+              disabled={loading}
+              aria-label="Back to phone number"
+            >
+              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
+              Back
+            </button>
+            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
+              This account has two-factor authentication enabled.
+              <br />
+              Please enter your cloud password.
+            </p>
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">2FA Password</span>
+              </div>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  className="input input-bordered w-full pr-12"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm absolute top-1/2 right-1 -translate-y-1/2"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                >
+                  {showPassword ? (
+                    <EyeSlashIcon className="h-5 w-5" aria-hidden="true" />
+                  ) : (
+                    <EyeIcon className="h-5 w-5" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
+            </label>
+            <button
+              className="btn btn-primary w-full"
+              onClick={handleSubmitPassword}
+              disabled={loading || !password.trim()}
             >
               {loading ? (
                 <span className="loading loading-spinner loading-md"></span>

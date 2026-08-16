@@ -212,25 +212,31 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
     await client.connect()
     try:
         try:
-            # Use the phone_code_hash passed back from the client
-            try:
-                await client.sign_in(
-                    phone=data.phone_number,
-                    code=data.verification_code,
-                    phone_code_hash=data.phone_code_hash
-                )
-            except errors.SessionPasswordNeededError:
-                if data.password is None:
-                    raise HTTPException(status_code=401, detail="2FA Password required")
-                await client.sign_in(password=data.password)
+            await client.sign_in(
+                phone=data.phone_number,
+                code=data.verification_code,
+                phone_code_hash=data.phone_code_hash
+            )
         except errors.SessionPasswordNeededError:
-            raise HTTPException(status_code=401, detail="2FA Password required")
-        return AuthSignInResponse(session_string=client.session.save())
+            if data.password is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"detail": "2FA Password required", "code": "password_required"},
+                )
+            await client.sign_in(password=data.password)
+    except errors.PasswordHashInvalidError:
+        raise HTTPException(
+            status_code=401,
+            detail={"detail": "Invalid 2FA password", "code": "invalid_password"},
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         if client.is_connected():
             await client.disconnect()
+    return AuthSignInResponse(session_string=client.session.save())
 
 @app.post("/job")
 async def create_messaging_job(job_data: MessagingJob, background_tasks: BackgroundTasks):

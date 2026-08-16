@@ -1,5 +1,18 @@
 const BASE = '/api';
 
+export class AuthError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'AuthError';
+    this.code = code;
+  }
+}
+
+function parseError(message: string, fallback: string): Error {
+  return new Error(message || fallback);
+}
+
 export async function sendCode(phone_number: string) {
   const res = await fetch(`${BASE}/auth/send-code`, {
     method: 'POST',
@@ -8,7 +21,8 @@ export async function sendCode(phone_number: string) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || 'Failed to send code');
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    throw parseError(detail, 'Failed to send code');
   }
   return res.json() as Promise<{
     phone_number: string;
@@ -31,7 +45,13 @@ export async function signIn(data: {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || 'Failed to sign in');
+    const detail = err.detail;
+    if (detail && typeof detail === 'object') {
+      const message = typeof detail.detail === 'string' ? detail.detail : '';
+      const code = typeof detail.code === 'string' ? detail.code : undefined;
+      throw new AuthError(message || 'Failed to sign in', code);
+    }
+    throw parseError(typeof detail === 'string' ? detail : '', 'Failed to sign in');
   }
   return res.json() as Promise<{ session_string: string }>;
 }
@@ -48,7 +68,8 @@ export async function createJob(data: {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || 'Failed to create job');
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    throw parseError(detail, 'Failed to create job');
   }
   return res.json() as Promise<{ job_id: string; status: string }>;
 }
