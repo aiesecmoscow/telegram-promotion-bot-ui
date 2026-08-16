@@ -5,7 +5,7 @@
 Проект состоит из двух сервисов, объединённых через Docker Compose:
 
 - **Backend** — FastAPI-приложение на Python с библиотекой [Telethon](https://docs.telethon.dev/), которое общается с Telegram от имени авторизованного пользователя.
-- **Frontend** — одностраничное React-приложение на TypeScript + Vite + Material UI, раздаваемое через nginx.
+- **Frontend** — одностраничное React-приложение на TypeScript + Material UI, бандлинг и раздача через `Bun.serve` (`server.ts`).
 
 ## Возможности
 
@@ -19,14 +19,14 @@
 ## Архитектура
 
 ```
-┌──────────┐   /api/*    ┌─────────────┐   Telethon    ┌────────────┐
-│ Браузер  │ ──────────▶ │ nginx:8080  │ ────────────▶ │  Telegram  │
-│ (SPA)    │             │   (frontend)│               │     API    │
-└──────────┘             └──────┬──────┘               └────────────┘
+┌──────────┐   /api/*    ┌──────────────┐   Telethon    ┌────────────┐
+│ Браузер  │ ──────────▶ │ Bun.serve:8080│ ────────────▶ │  Telegram  │
+│ (SPA)    │             │   (frontend) │               │     API    │
+└──────────┘             └──────┬───────┘               └────────────┘
                                 │
                                 ▼
                         ┌──────────────┐
-                        │ backend:8080 │
+                        │ backend:8000 │
                         │   (FastAPI)  │
                         └──────────────┘
 ```
@@ -35,10 +35,10 @@
 
 | Сервис   | Порт хоста | Порт контейнера | Описание                         |
 | -------- | ---------- | --------------- | -------------------------------- |
-| backend  | `8000`     | `8080`          | FastAPI + Telethon               |
-| frontend | `3000`     | `8080`          | nginx, раздаёт SPA и проксирует `/api/*` на `backend:8080` |
+| backend  | `8000`     | `8000`          | FastAPI + Telethon               |
+| frontend | `3000`     | `8080`          | `Bun.serve` (статика + reverse-proxy `/api/*`) |
 
-Проксирование `/api/*` настроено в [`frontend/nginx.conf`](./frontend/nginx.conf).
+Проксирование `/api/*` настроено в [`frontend/server.ts`](./frontend/server.ts).
 
 ## Требования
 
@@ -77,11 +77,11 @@ uv sync
 uv run fastapi run main.py --port 8000 --host 0.0.0.0
 ```
 
-Backend стартует на `http://localhost:8080`. Документация OpenAPI — на `/docs`.
+Backend стартует на `http://localhost:8000`. Документация OpenAPI — на `/docs`.
 
 ### Frontend
 
-По умолчанию в [`frontend/nginx.conf`](./frontend/nginx.conf) прокси `/api` указывает на `backend:8080` (имя сервиса в Docker-сети). Для запуска вне Docker нужно либо поднять backend на `localhost:8080` и поправить `BASE` в [`frontend/src/api.ts`](./frontend/src/api.ts) на абсолютный URL, либо добавить прокси в [`frontend/vite.config.ts`](./frontend/vite.config.ts).
+По умолчанию в [`frontend/server.ts`](./frontend/server.ts) значение `BACKEND_URL` — `http://localhost:8000`. Для запуска вне Docker достаточно поднять backend на этом порту (см. выше). В Docker-сети используется `http://backend:8000` (см. [`compose.yml`](./compose.yml)).
 
 ```bash
 cd frontend
@@ -89,7 +89,7 @@ bun install
 bun run dev
 ```
 
-Dev-сервер Vite стартует на `http://localhost:5173` (или другом свободном порту).
+Dev-сервер `Bun.serve` стартует на `http://localhost:8080` с HMR.
 
 ## Переменные окружения
 
@@ -162,14 +162,14 @@ Dev-сервер Vite стартует на `http://localhost:5173` (или др
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   └── uv.lock
-├── frontend/                      # React + TypeScript + Vite + nginx
+├── frontend/                      # React + TypeScript + Bun.serve
 │   ├── src/
 │   │   ├── App.tsx                # SPA: login → verify → main
 │   │   └── api.ts                 # Обёртки над /api/*
+│   ├── server.ts                  # Bun.serve: статика + прокси /api
 │   ├── Dockerfile
-│   ├── nginx.conf                 # Проксирование /api → backend
 │   ├── package.json
-│   └── vite.config.ts
+│   └── tsconfig*.json
 ├── compose.yml                    # Оркестрация сервисов
 └── .env                           # НЕ коммитить (API_ID, API_HASH)
 ```
