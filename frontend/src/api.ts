@@ -56,6 +56,20 @@ export async function signIn(data: {
   return res.json() as Promise<{ session_string: string }>;
 }
 
+export async function signInWithSession(session_string: string) {
+  const res = await fetch(`${BASE}/auth/sign-in-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_string }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    throw parseError(detail, 'Failed to sign in with session');
+  }
+  return res.json() as Promise<{ session_string: string }>;
+}
+
 export async function createJob(data: {
   session_string: string;
   usernames: string[];

@@ -69,12 +69,34 @@ class AuthSignIn(BaseModel):
 class AuthSignInResponse(BaseModel):
     """
     Response model for successful authentication.
-    
+
     Attributes:
-        session_string (str): Updated session string that should be used for 
+        session_string (str): Updated session string that should be used for
                              all subsequent authenticated API calls.
-                             This session is now fully authenticated and ready 
+                             This session is now fully authenticated and ready
                              to send messages.
+    """
+    session_string: str
+
+class AuthSignInSessionRequest(BaseModel):
+    """
+    Request model for signing in with an existing Telegram StringSession.
+
+    Attributes:
+        session_string (str): Serialized Telethon StringSession obtained
+                              previously (e.g. via client.session.save()).
+    """
+    session_string: str
+
+class AuthSignInSessionResponse(BaseModel):
+    """
+    Response model for successful session-string sign-in.
+
+    Attributes:
+        session_string (str): Updated session string that should be used for
+                             all subsequent authenticated API calls. Telegram
+                             may rotate auth keys, so the returned string can
+                             differ from the input.
     """
     session_string: str
 
@@ -237,6 +259,51 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
         if client.is_connected():
             await client.disconnect()
     return AuthSignInResponse(session_string=client.session.save())
+
+@app.post("/auth/sign-in-session", response_model=AuthSignInSessionResponse)
+async def sign_in_with_session(data: AuthSignInSessionRequest) -> AuthSignInSessionResponse:
+    """
+    Sign in using an existing Telethon StringSession.
+
+    Skips the phone-number / SMS-code / 2FA flow for callers that already have
+    a serialized session. The session is re-saved after validation because
+    Telegram may rotate auth keys; the returned string should be used for all
+    subsequent authenticated API calls.
+
+    Args:
+        data (AuthSignInSessionRequest): The serialized StringSession to validate.
+
+    Returns:
+        AuthSignInSessionResponse: Contains the (possibly rotated) session
+                                  string that should be used for subsequent
+                                  requests.
+
+    Raises:
+        HTTPException:
+            - 400: If the session string is malformed, not a valid Telethon
+                   StringSession, or Telethon fails to connect.
+            - 401: If the session is well-formed but the user is not
+                   authorized (e.g. the session has been logged out or has
+                   expired).
+    """
+    client = None
+    try:
+        client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH)
+        await client.connect()
+        authorized = await client.is_user_authorized()
+        if not authorized:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired session",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        if client is not None and client.is_connected():
+            await client.disconnect()
+    return AuthSignInSessionResponse(session_string=client.session.save())
 
 @app.post("/job")
 async def create_messaging_job(job_data: MessagingJob, background_tasks: BackgroundTasks):

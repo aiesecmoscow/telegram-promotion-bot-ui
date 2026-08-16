@@ -4,7 +4,7 @@ import {
   EyeIcon,
   EyeSlashIcon,
 } from '@heroicons/react/24/outline';
-import { sendCode, signIn, createJob, AuthError } from './api';
+import { sendCode, signIn, signInWithSession, createJob, AuthError } from './api';
 
 type Page = 'login' | 'verify' | 'password' | 'main';
 
@@ -15,6 +15,8 @@ function App() {
 
   // Login
   const [phone, setPhone] = useState('');
+  const [loginMode, setLoginMode] = useState<'phone' | 'session'>('phone');
+  const [sessionInput, setSessionInput] = useState('');
 
   // Verify / Password
   const [code, setCode] = useState('');
@@ -28,6 +30,7 @@ function App() {
   const [usernames, setUsernames] = useState('');
   const [message, setMessage] = useState('');
   const [jobStatus, setJobStatus] = useState('');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   // Restore session from localStorage on mount
   useEffect(() => {
@@ -37,6 +40,13 @@ function App() {
       setPage('main');
     }
   }, []);
+
+  // Auto-reset copy button feedback after 1500ms
+  useEffect(() => {
+    if (copyState === 'idle') return;
+    const t = setTimeout(() => setCopyState('idle'), 1500);
+    return () => clearTimeout(t);
+  }, [copyState]);
 
   const handleSendCode = async () => {
     setError('');
@@ -150,6 +160,56 @@ function App() {
     }
   };
 
+  const handleSignInWithSession = async () => {
+    setError('');
+    const trimmed = sessionInput.trim();
+    if (trimmed.length === 0) {
+      setError('Please paste a session string');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await signInWithSession(trimmed);
+      localStorage.setItem('tg_session', res.session_string);
+      setSession(res.session_string);
+      setSessionInput('');
+      setLoginMode('phone');
+      setPage('main');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopySession = async () => {
+    if (!session) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(session);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = session;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!ok) throw new Error('execCommand copy failed');
+      }
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  };
+
+  const handleBackToPhoneLogin = () => {
+    setError('');
+    setSessionInput('');
+    setLoginMode('phone');
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('tg_session');
     setSession('');
@@ -158,9 +218,12 @@ function App() {
     setPassword('');
     setTempSession('');
     setPhoneCodeHash('');
+    setSessionInput('');
+    setLoginMode('phone');
     setUsernames('');
     setMessage('');
     setJobStatus('');
+    setCopyState('idle');
     setError('');
     setPage('login');
   };
@@ -185,7 +248,7 @@ function App() {
           </div>
         )}
 
-        {page === 'login' && (
+        {page === 'login' && loginMode === 'phone' && (
           <div className="flex flex-col gap-4">
             <label className="form-control w-full">
               <div className="label">
@@ -207,6 +270,61 @@ function App() {
                 <span className="loading loading-spinner loading-md"></span>
               ) : (
                 'Continue'
+              )}
+            </button>
+            <div className="divider text-xs">or</div>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm self-center"
+              onClick={() => {
+                setError('');
+                setLoginMode('session');
+              }}
+              disabled={loading}
+            >
+              Sign in with session string
+            </button>
+          </div>
+        )}
+
+        {page === 'login' && loginMode === 'session' && (
+          <div className="flex flex-col gap-4">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
+              onClick={handleBackToPhoneLogin}
+              disabled={loading}
+              aria-label="Back to phone number"
+            >
+              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
+              Back
+            </button>
+            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
+              Paste an existing Telethon StringSession to sign in
+              <br />
+              without a phone number and SMS code.
+            </p>
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">Session string</span>
+              </div>
+              <textarea
+                className="textarea textarea-bordered w-full font-mono text-xs break-all"
+                rows={3}
+                placeholder="Paste your StringSession here…"
+                value={sessionInput}
+                onChange={(e) => setSessionInput(e.target.value)}
+              />
+            </label>
+            <button
+              className="btn btn-primary w-full"
+              onClick={handleSignInWithSession}
+              disabled={loading || !sessionInput.trim()}
+            >
+              {loading ? (
+                <span className="loading loading-spinner loading-md"></span>
+              ) : (
+                'Login'
               )}
             </button>
           </div>
@@ -356,6 +474,18 @@ function App() {
                 {jobStatus}
               </div>
             )}
+            <button
+              className="btn btn-ghost btn-sm self-center"
+              onClick={handleCopySession}
+              disabled={loading || !session}
+              aria-live="polite"
+            >
+              {copyState === 'copied'
+                ? 'Copied!'
+                : copyState === 'failed'
+                  ? 'Copy failed'
+                  : 'Copy session'}
+            </button>
             <button
               className="btn btn-ghost btn-sm self-center"
               onClick={handleLogout}
