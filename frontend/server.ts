@@ -35,9 +35,9 @@ Bun.serve({
           const url = new URL(req.url);
           const path = url.pathname === "/" ? "/index.html" : url.pathname;
           if (path.includes("..")) return new Response("Bad request", { status: 400 });
-          const file = Bun.file(`./public${path}`);
+          const file = Bun.file(`./dist${path}`);
           if (await file.exists()) return withCacheHeaders(path, file);
-          const fallback = Bun.file("./public/index.html");
+          const fallback = Bun.file("./dist/index.html");
           return new Response(fallback, { headers: { "Content-Type": "text/html" } });
         }
       : index,

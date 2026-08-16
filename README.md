@@ -5,7 +5,7 @@
 Проект состоит из двух сервисов, объединённых через Docker Compose:
 
 - **Backend** — FastAPI-приложение на Python с библиотекой [Telethon](https://docs.telethon.dev/), которое общается с Telegram от имени авторизованного пользователя.
-- **Frontend** — одностраничное React-приложение на TypeScript + Material UI, бандлинг и раздача через `Bun.serve` (`server.ts`).
+- **Frontend** — одностраничное React-приложение на TypeScript + Tailwind CSS + daisyui, бандлинг и раздача через `Bun.serve` (`server.ts`).
 
 ## Возможности
 

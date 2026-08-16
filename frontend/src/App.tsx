@@ -1,14 +1,5 @@
 import { useState, useEffect } from 'react';
-import {
-  Container,
-  TextField,
-  Button,
-  Typography,
-  Alert,
-  Paper,
-  Stack,
-  CircularProgress,
-} from '@mui/material';
+import { ChevronLeftIcon } from '@heroicons/react/24/outline';
 import { sendCode, signIn, createJob } from './api';
 
 type Page = 'login' | 'verify' | 'main';
@@ -59,6 +50,10 @@ function App() {
 
   const handleSignIn = async () => {
     setError('');
+    if (!tempSession || !phoneCodeHash) {
+      setError('Session expired. Please go back and request a new code.');
+      return;
+    }
     setLoading(true);
     try {
       const res = await signIn({
@@ -76,6 +71,15 @@ function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleBackToLogin = () => {
+    setError('');
+    setCode('');
+    setPassword('');
+    setTempSession('');
+    setPhoneCodeHash('');
+    setPage('login');
   };
 
   const handleStart = async () => {
@@ -124,107 +128,160 @@ function App() {
   };
 
   return (
-    <Container maxWidth="sm" sx={{ mt: 8 }}>
-      <Paper elevation={3} sx={{ p: 4 }}>
-        <Typography variant="h5" gutterBottom align="center">
+    <div className="mx-auto max-w-sm mt-16 px-4">
+      <div className="card bg-base-100 shadow-xl p-8">
+        <h1 className="text-2xl font-bold text-center mb-6">
           Telegram Promotion Bot
-        </Typography>
+        </h1>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
-            {error}
-          </Alert>
+          <div role="alert" className="alert alert-error mb-4">
+            <span>{error}</span>
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => setError('')}
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
         )}
 
         {page === 'login' && (
-          <Stack spacing={2}>
-            <TextField
-              label="Phone number"
-              placeholder="+1234567890"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              fullWidth
-            />
-            <Button
-              variant="contained"
+          <div className="flex flex-col gap-4">
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">Phone number</span>
+              </div>
+              <input
+                className="input input-bordered w-full"
+                placeholder="+1234567890"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </label>
+            <button
+              className="btn btn-primary w-full"
               onClick={handleSendCode}
               disabled={loading || !phone.trim()}
-              fullWidth
             >
-              {loading ? <CircularProgress size={24} /> : 'Continue'}
-            </Button>
-          </Stack>
+              {loading ? (
+                <span className="loading loading-spinner loading-md"></span>
+              ) : (
+                'Continue'
+              )}
+            </button>
+          </div>
         )}
 
         {page === 'verify' && (
-          <Stack spacing={2}>
-            <TextField
-              label="Verification code"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="2FA Password (optional)"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              fullWidth
-            />
-            <Button
-              variant="contained"
-              onClick={handleSignIn}
-              disabled={loading || !code.trim()}
-              fullWidth
+          <div className="flex flex-col gap-4">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
+              onClick={handleBackToLogin}
+              disabled={loading}
+              aria-label="Back to phone number"
             >
-              {loading ? <CircularProgress size={24} /> : 'Login'}
-            </Button>
-          </Stack>
+              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
+              Back
+            </button>
+            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
+              Code sent to
+              <br />
+              <span className="font-medium text-base-content">{phone}</span>
+            </p>
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">Verification code</span>
+              </div>
+              <input
+                className="input input-bordered w-full"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+            </label>
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">2FA Password (optional)</span>
+              </div>
+              <input
+                type="password"
+                className="input input-bordered w-full"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </label>
+            <button
+              className="btn btn-primary w-full"
+              onClick={handleSignIn}
+              disabled={
+                loading ||
+                !code.trim() ||
+                !tempSession ||
+                !phoneCodeHash
+              }
+            >
+              {loading ? (
+                <span className="loading loading-spinner loading-md"></span>
+              ) : (
+                'Login'
+              )}
+            </button>
+          </div>
         )}
 
         {page === 'main' && (
-          <Stack spacing={2}>
-            <TextField
-              label="Usernames (one per line)"
-              multiline
-              minRows={4}
-              value={usernames}
-              onChange={(e) => setUsernames(e.target.value)}
-              placeholder={'username1\nusername2\nusername3'}
-              fullWidth
-            />
-            <TextField
-              label="Message"
-              multiline
-              minRows={4}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              fullWidth
-            />
-            <Button
-              variant="contained"
-              color="primary"
+          <div className="flex flex-col gap-4">
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">Usernames (one per line)</span>
+              </div>
+              <textarea
+                className="textarea textarea-bordered w-full"
+                rows={4}
+                placeholder={'username1\nusername2\nusername3'}
+                value={usernames}
+                onChange={(e) => setUsernames(e.target.value)}
+              />
+            </label>
+            <label className="form-control w-full">
+              <div className="label">
+                <span className="label-text">Message</span>
+              </div>
+              <textarea
+                className="textarea textarea-bordered w-full"
+                rows={4}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+              />
+            </label>
+            <button
+              className="btn btn-primary w-full"
               onClick={handleStart}
               disabled={loading}
-              fullWidth
             >
-              {loading ? <CircularProgress size={24} /> : 'Start'}
-            </Button>
+              {loading ? (
+                <span className="loading loading-spinner loading-md"></span>
+              ) : (
+                'Start'
+              )}
+            </button>
             {jobStatus && (
-              <Alert severity="success">{jobStatus}</Alert>
+              <div role="alert" className="alert alert-success">
+                {jobStatus}
+              </div>
             )}
-            <Button
-              variant="text"
-              color="secondary"
+            <button
+              className="btn btn-ghost btn-sm self-center"
               onClick={handleLogout}
-              size="small"
             >
               Logout
-            </Button>
-          </Stack>
+            </button>
+          </div>
         )}
-      </Paper>
-    </Container>
+      </div>
+    </div>
   );
 }
 
