@@ -1,230 +1,32 @@
-import { useState, useEffect } from 'react';
-import {
-  ChevronLeftIcon,
-  EyeIcon,
-  EyeSlashIcon,
-} from '@heroicons/react/24/outline';
-import { sendCode, signIn, signInWithSession, createJob, AuthError } from './api';
+import { useState } from 'react';
+import Auth from './components/Auth';
+import MainView from './components/MainView';
 
-type Page = 'login' | 'verify' | 'password' | 'main';
+type Page = 'login' | 'main';
 
 function App() {
-  const [page, setPage] = useState<Page>('login');
+  const [session, setSession] = useState<string>(
+    () => localStorage.getItem('tg_session') ?? '',
+  );
+  const [page, setPage] = useState<Page>(() =>
+    localStorage.getItem('tg_session') ? 'main' : 'login',
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Login
-  const [phone, setPhone] = useState('');
-  const [loginMode, setLoginMode] = useState<'phone' | 'session'>('phone');
-  const [sessionInput, setSessionInput] = useState('');
-
-  // Verify / Password
-  const [code, setCode] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [phoneCodeHash, setPhoneCodeHash] = useState('');
-  const [tempSession, setTempSession] = useState('');
-
-  // Main
-  const [session, setSession] = useState('');
-  const [usernames, setUsernames] = useState('');
-  const [message, setMessage] = useState('');
-  const [jobStatus, setJobStatus] = useState('');
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
-
-  // Restore session from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem('tg_session');
-    if (saved) {
-      setSession(saved);
-      setPage('main');
-    }
-  }, []);
-
-  // Auto-reset copy button feedback after 1500ms
-  useEffect(() => {
-    if (copyState === 'idle') return;
-    const t = setTimeout(() => setCopyState('idle'), 1500);
-    return () => clearTimeout(t);
-  }, [copyState]);
-
-  const handleSendCode = async () => {
+  const handleAuthenticated = (s: string) => {
+    localStorage.setItem('tg_session', s);
+    setSession(s);
     setError('');
-    setLoading(true);
-    try {
-      const res = await sendCode(phone);
-      setTempSession(res.session_string);
-      setPhoneCodeHash(res.phone_code_hash);
-      setPage('verify');
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSignIn = async () => {
-    setError('');
-    if (!tempSession || !phoneCodeHash) {
-      setError('Session expired. Please go back and request a new code.');
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await signIn({
-        session_string: tempSession,
-        phone_code_hash: phoneCodeHash,
-        phone_number: phone,
-        verification_code: code,
-      });
-      localStorage.setItem('tg_session', res.session_string);
-      setSession(res.session_string);
-      setPage('main');
-    } catch (e: unknown) {
-      if (e instanceof AuthError && e.code === 'password_required') {
-        setPage('password');
-      } else {
-        setError(e instanceof Error ? e.message : 'Unknown error');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSubmitPassword = async () => {
-    setError('');
-    if (!tempSession || !phoneCodeHash) {
-      setError('Session expired. Please go back and request a new code.');
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await signIn({
-        session_string: tempSession,
-        phone_code_hash: phoneCodeHash,
-        phone_number: phone,
-        verification_code: code,
-        password,
-      });
-      localStorage.setItem('tg_session', res.session_string);
-      setSession(res.session_string);
-      setPassword('');
-      setPage('main');
-    } catch (e: unknown) {
-      if (e instanceof AuthError && e.code === 'invalid_password') {
-        setError('Invalid password. Please try again.');
-      } else {
-        setError(e instanceof Error ? e.message : 'Unknown error');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleBackToLogin = () => {
-    setError('');
-    setCode('');
-    setPassword('');
-    setTempSession('');
-    setPhoneCodeHash('');
-    setPage('login');
-  };
-
-  const handleStart = async () => {
-    setError('');
-    setJobStatus('');
-    setLoading(true);
-    try {
-      const list = usernames
-        .split('\n')
-        .map((u) => u.trim())
-        .filter(Boolean);
-      if (list.length === 0) {
-        setError('Please enter at least one username');
-        return;
-      }
-      if (!message.trim()) {
-        setError('Please enter a message');
-        return;
-      }
-      const res = await createJob({
-        session_string: session,
-        usernames: list,
-        message: message.trim(),
-      });
-      setJobStatus(`Job created! ID: ${res.job_id} — Status: ${res.status}`);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSignInWithSession = async () => {
-    setError('');
-    const trimmed = sessionInput.trim();
-    if (trimmed.length === 0) {
-      setError('Please paste a session string');
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await signInWithSession(trimmed);
-      localStorage.setItem('tg_session', res.session_string);
-      setSession(res.session_string);
-      setSessionInput('');
-      setLoginMode('phone');
-      setPage('main');
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCopySession = async () => {
-    if (!session) return;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(session);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = session;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (!ok) throw new Error('execCommand copy failed');
-      }
-      setCopyState('copied');
-    } catch {
-      setCopyState('failed');
-    }
-  };
-
-  const handleBackToPhoneLogin = () => {
-    setError('');
-    setSessionInput('');
-    setLoginMode('phone');
+    setLoading(false);
+    setPage('main');
   };
 
   const handleLogout = () => {
     localStorage.removeItem('tg_session');
     setSession('');
-    setPhone('');
-    setCode('');
-    setPassword('');
-    setTempSession('');
-    setPhoneCodeHash('');
-    setSessionInput('');
-    setLoginMode('phone');
-    setUsernames('');
-    setMessage('');
-    setJobStatus('');
-    setCopyState('idle');
     setError('');
+    setLoading(false);
     setPage('login');
   };
 
@@ -248,251 +50,23 @@ function App() {
           </div>
         )}
 
-        {page === 'login' && loginMode === 'phone' && (
-          <div className="flex flex-col gap-4">
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">Phone number</span>
-              </div>
-              <input
-                className="input input-bordered w-full"
-                placeholder="+1234567890"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-              />
-            </label>
-            <button
-              className="btn btn-primary w-full"
-              onClick={handleSendCode}
-              disabled={loading || !phone.trim()}
-            >
-              {loading ? (
-                <span className="loading loading-spinner loading-md"></span>
-              ) : (
-                'Continue'
-              )}
-            </button>
-            <div className="divider text-xs">or</div>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm self-center"
-              onClick={() => {
-                setError('');
-                setLoginMode('session');
-              }}
-              disabled={loading}
-            >
-              Sign in with session string
-            </button>
-          </div>
-        )}
-
-        {page === 'login' && loginMode === 'session' && (
-          <div className="flex flex-col gap-4">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
-              onClick={handleBackToPhoneLogin}
-              disabled={loading}
-              aria-label="Back to phone number"
-            >
-              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
-              Back
-            </button>
-            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
-              Paste an existing Telethon StringSession to sign in
-              <br />
-              without a phone number and SMS code.
-            </p>
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">Session string</span>
-              </div>
-              <textarea
-                className="textarea textarea-bordered w-full font-mono text-xs break-all"
-                rows={3}
-                placeholder="Paste your StringSession here…"
-                value={sessionInput}
-                onChange={(e) => setSessionInput(e.target.value)}
-              />
-            </label>
-            <button
-              className="btn btn-primary w-full"
-              onClick={handleSignInWithSession}
-              disabled={loading || !sessionInput.trim()}
-            >
-              {loading ? (
-                <span className="loading loading-spinner loading-md"></span>
-              ) : (
-                'Login'
-              )}
-            </button>
-          </div>
-        )}
-
-        {page === 'verify' && (
-          <div className="flex flex-col gap-4">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
-              onClick={handleBackToLogin}
-              disabled={loading}
-              aria-label="Back to phone number"
-            >
-              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
-              Back
-            </button>
-            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
-              Code sent to
-              <br />
-              <span className="font-medium text-base-content">{phone}</span>
-            </p>
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">Verification code</span>
-              </div>
-              <input
-                className="input input-bordered w-full"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-              />
-            </label>
-            <button
-              className="btn btn-primary w-full"
-              onClick={handleSignIn}
-              disabled={
-                loading ||
-                !code.trim() ||
-                !tempSession ||
-                !phoneCodeHash
-              }
-            >
-              {loading ? (
-                <span className="loading loading-spinner loading-md"></span>
-              ) : (
-                'Login'
-              )}
-            </button>
-          </div>
-        )}
-
-        {page === 'password' && (
-          <div className="flex flex-col gap-4">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm self-start -mt-2 -ml-2"
-              onClick={handleBackToLogin}
-              disabled={loading}
-              aria-label="Back to phone number"
-            >
-              <ChevronLeftIcon className="h-5 w-5" aria-hidden="true" />
-              Back
-            </button>
-            <p className="text-sm text-base-content/70 text-center -mt-4 mb-2">
-              This account has two-factor authentication enabled.
-              <br />
-              Please enter your cloud password.
-            </p>
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">2FA Password</span>
-              </div>
-              <div className="relative">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  className="input input-bordered w-full pr-12"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm absolute top-1/2 right-1 -translate-y-1/2"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                  aria-pressed={showPassword}
-                >
-                  {showPassword ? (
-                    <EyeSlashIcon className="h-5 w-5" aria-hidden="true" />
-                  ) : (
-                    <EyeIcon className="h-5 w-5" aria-hidden="true" />
-                  )}
-                </button>
-              </div>
-            </label>
-            <button
-              className="btn btn-primary w-full"
-              onClick={handleSubmitPassword}
-              disabled={loading || !password.trim()}
-            >
-              {loading ? (
-                <span className="loading loading-spinner loading-md"></span>
-              ) : (
-                'Login'
-              )}
-            </button>
-          </div>
-        )}
-
-        {page === 'main' && (
-          <div className="flex flex-col gap-4">
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">Usernames (one per line)</span>
-              </div>
-              <textarea
-                className="textarea textarea-bordered w-full"
-                rows={4}
-                placeholder={'username1\nusername2\nusername3'}
-                value={usernames}
-                onChange={(e) => setUsernames(e.target.value)}
-              />
-            </label>
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">Message</span>
-              </div>
-              <textarea
-                className="textarea textarea-bordered w-full"
-                rows={4}
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-              />
-            </label>
-            <button
-              className="btn btn-primary w-full"
-              onClick={handleStart}
-              disabled={loading}
-            >
-              {loading ? (
-                <span className="loading loading-spinner loading-md"></span>
-              ) : (
-                'Start'
-              )}
-            </button>
-            {jobStatus && (
-              <div role="alert" className="alert alert-success">
-                {jobStatus}
-              </div>
-            )}
-            <button
-              className="btn btn-ghost btn-sm self-center"
-              onClick={handleCopySession}
-              disabled={loading || !session}
-              aria-live="polite"
-            >
-              {copyState === 'copied'
-                ? 'Copied!'
-                : copyState === 'failed'
-                  ? 'Copy failed'
-                  : 'Copy session'}
-            </button>
-            <button
-              className="btn btn-ghost btn-sm self-center"
-              onClick={handleLogout}
-            >
-              Logout
-            </button>
-          </div>
+        {page === 'main' && session ? (
+          <MainView
+            session={session}
+            loading={loading}
+            setLoading={setLoading}
+            error={error}
+            setError={setError}
+            onLogout={handleLogout}
+          />
+        ) : (
+          <Auth
+            loading={loading}
+            setLoading={setLoading}
+            error={error}
+            setError={setError}
+            onAuthenticated={handleAuthenticated}
+          />
         )}
       </div>
     </div>
