@@ -1,16 +1,23 @@
 services:
   backend:
     build: ./backend
-    ports:
-      - "8000:8000"
+    expose: [ 8000 ]
     environment:
       - API_ID=${API_ID}
       - API_HASH=${API_HASH}
+      - SOCKS5_HOST=${SOCKS5_HOST:-}
+      - SOCKS5_PORT=${SOCKS5_PORT:-}
+      - SOCKS5_USERNAME=${SOCKS5_USERNAME:-}
+      - SOCKS5_PASSWORD=${SOCKS5_PASSWORD:-}
 
   frontend:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.promotion-bot.rule=Host(`promotion-bot.aiesecmoscow.whaleharbor.net`)"
+      - "traefik.http.routers.promotion-bot.entrypoints=websecure"
+      - "traefik.http.routers.promotion-bot.tls.certresolver=myresolver"
     build: ./frontend
-    ports:
-      - "3000:8080"
+    expose: [ 8080 ]
     environment:
       - BACKEND_URL=http://backend:8000
     depends_on:

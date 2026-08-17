@@ -1,21 +1,55 @@
 import asyncio
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import socks
 
 # REDACTED_SESSION=
 
 class Settings(BaseSettings):
     API_ID: int = REDACTED
     API_HASH: str = "REDACTED"
-    
+    SOCKS5_HOST: str = ""
+    SOCKS5_PORT: int = 0
+    SOCKS5_USERNAME: Optional[str] = None
+    SOCKS5_PASSWORD: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file=".env")
 
+    @model_validator(mode="after")
+    def _validate_socks5(self) -> "Settings":
+        if self.SOCKS5_HOST:
+            if not (1 <= self.SOCKS5_PORT <= 65535):
+                raise ValueError(
+                    "SOCKS5_PORT must be an integer in 1..65535 when SOCKS5_HOST is set"
+                )
+        elif self.SOCKS5_PORT:
+            raise ValueError("SOCKS5_PORT is set but SOCKS5_HOST is empty")
+
+        if (self.SOCKS5_USERNAME is None) != (self.SOCKS5_PASSWORD is None):
+            raise ValueError(
+                "SOCKS5_USERNAME and SOCKS5_PASSWORD must be set together or both be empty"
+            )
+        return self
+
 settings = Settings()
+
+
+def _build_proxy(cfg: Settings) -> Optional[Tuple]:
+    if not cfg.SOCKS5_HOST:
+        return None
+    return (
+        socks.SOCKS5,
+        cfg.SOCKS5_HOST,
+        cfg.SOCKS5_PORT,
+        True,
+        cfg.SOCKS5_USERNAME,
+        cfg.SOCKS5_PASSWORD,
+    )
 
 app = FastAPI(title="AIESEC Moscow Telegram Unified Backend")
 
@@ -139,10 +173,11 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
             - "Failed: {error}": Job failed with specific error message
     """
     jobs_db[job_id] = "Processing"
-    
+    proxy = _build_proxy(settings)
+
     try:
         # Initialize client with the provided session string
-        client = TelegramClient(StringSession(session), settings.API_ID, settings.API_HASH)
+        client = TelegramClient(StringSession(session), settings.API_ID, settings.API_HASH, proxy=proxy)
         await client.connect()
         
         for username in usernames:
@@ -188,7 +223,7 @@ async def send_code(data: AuthSendCode) -> AuthSendCodeResponse:
         The client must store both the session_string and phone_code_hash 
         to complete the authentication process in the next step.
     """
-    client = TelegramClient(StringSession(), settings.API_ID, settings.API_HASH)
+    client = TelegramClient(StringSession(), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
     await client.connect()
     try:
         sent_code = await client.send_code_request(data.phone_number)
@@ -230,7 +265,7 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
         sign_in call will raise SessionPasswordNeededError, and a second 
         call with the password parameter is required.
     """
-    client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH)
+    client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
     await client.connect()
     try:
         try:
@@ -288,7 +323,7 @@ async def sign_in_with_session(data: AuthSignInSessionRequest) -> AuthSignInSess
     """
     client = None
     try:
-        client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH)
+        client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
         await client.connect()
         authorized = await client.is_user_authorized()
         if not authorized:
