@@ -117,6 +117,7 @@ Dev-сервер `Bun.serve` стартует на `http://localhost:8080` с HM
 | `SOCKS5_PORT`   | int    | Порт SOCKS5-прокси (1..65535). Обязателен при заданном `SOCKS5_HOST`. |
 | `SOCKS5_USERNAME` | string | Имя пользователя SOCKS5 (опционально). Задаётся только вместе с `SOCKS5_PASSWORD`. |
 | `SOCKS5_PASSWORD` | string | Пароль SOCKS5 (опционально). Задаётся только вместе с `SOCKS5_USERNAME`. |
+| `LOG_LEVEL`     | string | Уровень логирования бэкенда: `DEBUG`/`INFO`/`WARNING`/`ERROR`. По умолчанию `INFO`. При `DEBUG` Telethon и uvicorn становятся очень шумными. |
 
 Значения читаются бэкендом через `pydantic-settings` из файла `.env` ([`backend/main.py`](./backend/main.py)).
 

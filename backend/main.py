@@ -1,5 +1,11 @@
 import asyncio
+import logging
+import os
+import re
+import sys
+import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import List, Dict, Optional, Tuple, Literal
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, model_validator
@@ -7,7 +13,78 @@ from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
 from telethon import password as pwd_mod
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from loguru import logger
 import socks
+
+
+class InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+
+_STRING_SESSION_RE = re.compile(r"[A-Za-z0-9+/=_-]{100,}")
+_SECRET_KEYS = ("session_string", "phone_code_hash", "password", "api_hash")
+
+
+def _redact_message(msg: str) -> str:
+    msg = _STRING_SESSION_RE.sub("***", msg)
+    for key in _SECRET_KEYS:
+        msg = re.sub(
+            rf"\b({re.escape(key)})\b(\s*[:=]\s*)([\"']?)([^\"',}}\]\s]+)",
+            lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}***",
+            msg,
+            flags=re.IGNORECASE,
+        )
+    return msg
+
+
+def _redact(record) -> bool:
+    record["message"] = _redact_message(record["message"])
+    return True
+
+
+def _resolve_log_level() -> str:
+    name = os.getenv("LOG_LEVEL", "INFO").upper()
+    try:
+        logger.level(name)
+        return name
+    except ValueError:
+        return "INFO"
+
+
+LOG_LEVEL = _resolve_log_level()
+
+logger.remove()
+
+
+def _stdout_sink(message) -> None:
+    # Redaction must happen on the *rendered* output so tracebacks (which are
+    # appended during formatting, after the per-record filter runs) get scrubbed
+    # too — otherwise Settings(...) frames would leak API_HASH etc.
+    sys.stdout.write(_redact_message(str(message)))
+
+
+logger.add(
+    _stdout_sink,
+    level=LOG_LEVEL,
+    colorize=True,
+    diagnose=False,
+    format=(
+        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>"
+    ),
+    filter=_redact,
+)
+
+logging.basicConfig(handlers=[InterceptHandler()], level=0)
+logging.getLogger().addHandler(InterceptHandler())
+
 
 # REDACTED_SESSION=
 
@@ -52,7 +129,33 @@ def _build_proxy(cfg: Settings) -> Optional[Tuple]:
         cfg.SOCKS5_PASSWORD,
     )
 
-app = FastAPI(title="AIESEC Moscow Telegram Unified Backend")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # uvicorn reconfigures its loggers on startup; silence its access logger
+    # so the middleware below is the single source of access logs.
+    logging.getLogger("uvicorn.access").disabled = True
+    yield
+
+
+app = FastAPI(title="AIESEC Moscow Telegram Unified Backend", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def access_log(request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    dur_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "{method} {path} -> {status} ({dur:.1f} ms) from {client}",
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        dur=dur_ms,
+        client=request.client.host if request.client else "-",
+    )
+    return response
+
 
 # Store for job statuses (mutated in place by background tasks; rendered
 # into a JobStatus on each GET /job/{job_id} call).
@@ -269,6 +372,11 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
         "results": [],
         "error": None,
     }
+    logger.info(
+        "mass_messaging_task job_id={job_id} total={total}",
+        job_id=job_id,
+        total=len(usernames),
+    )
     proxy = _build_proxy(settings)
     client = None
 
@@ -284,8 +392,19 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
                     {"recipient": username, "status": "sent", "error": None}
                 )
                 jobs_db[job_id]["sent"] += 1
+                logger.info(
+                    "job_id={job_id} recipient={recipient} status=sent",
+                    job_id=job_id,
+                    recipient=username,
+                )
                 await asyncio.sleep(20)
             except errors.FloodWaitError as e:
+                logger.warning(
+                    "job_id={job_id} recipient={recipient} flood_wait seconds={seconds}",
+                    job_id=job_id,
+                    recipient=username,
+                    seconds=e.seconds,
+                )
                 await asyncio.sleep(e.seconds)
                 try:
                     await client.send_message(username, text)
@@ -293,6 +412,11 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
                         {"recipient": username, "status": "sent", "error": None}
                     )
                     jobs_db[job_id]["sent"] += 1
+                    logger.info(
+                        "job_id={job_id} recipient={recipient} status=sent (after flood_wait)",
+                        job_id=job_id,
+                        recipient=username,
+                    )
                 except Exception as retry_e:
                     jobs_db[job_id]["results"].append(
                         {
@@ -302,6 +426,12 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
                         }
                     )
                     jobs_db[job_id]["failed"] += 1
+                    logger.info(
+                        "job_id={job_id} recipient={recipient} status=failed error={error}",
+                        job_id=job_id,
+                        recipient=username,
+                        error=type(retry_e).__name__,
+                    )
             except Exception as e:
                 jobs_db[job_id]["results"].append(
                     {
@@ -311,11 +441,28 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
                     }
                 )
                 jobs_db[job_id]["failed"] += 1
+                logger.info(
+                    "job_id={job_id} recipient={recipient} status=failed error={error}",
+                    job_id=job_id,
+                    recipient=username,
+                    error=type(e).__name__,
+                )
 
         jobs_db[job_id]["status"] = "Completed"
+        logger.info(
+            "job_id={job_id} status=Completed sent={sent} failed={failed}",
+            job_id=job_id,
+            sent=jobs_db[job_id]["sent"],
+            failed=jobs_db[job_id]["failed"],
+        )
     except Exception as e:
         jobs_db[job_id]["status"] = "Failed"
         jobs_db[job_id]["error"] = type(e).__name__
+        logger.opt(exception=True).error(
+            "job_id={job_id} status=Failed error={error}",
+            job_id=job_id,
+            error=type(e).__name__,
+        )
     finally:
         jobs_db[job_id]["current"] = None
         if client and client.is_connected():
@@ -346,13 +493,16 @@ async def send_code(data: AuthSendCode) -> AuthSendCodeResponse:
         The client must store both the session_string and phone_code_hash 
         to complete the authentication process in the next step.
     """
+    logger.info("send_code phone=***{last4}", last4=data.phone_number[-4:])
     client = TelegramClient(StringSession(), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
     await client.connect()
     try:
         sent_code = await client.send_code_request(data.phone_number)
         session_string = client.session.save()
+        logger.info("send_code succeeded phone=***{last4}", last4=data.phone_number[-4:])
         return AuthSendCodeResponse(session_string=session_string, phone_code_hash=sent_code.phone_code_hash, phone_number=data.phone_number)
     except Exception as e:
+        logger.exception("send_code failed phone=***{last4}", last4=data.phone_number[-4:])
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         if client.is_connected():
@@ -385,9 +535,10 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
                    
     Note:
         If the account has two-factor authentication enabled, the initial 
-        sign_in call will raise SessionPasswordNeededError, and a second 
-        call with the password parameter is required.
+sign_in call will raise SessionPasswordNeededError, and a second 
+    call with the password parameter is required.
     """
+    logger.info("sign_in phone=***{last4} has_password={has_pw}", last4=data.phone_number[-4:], has_pw=data.password is not None)
     client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
     await client.connect()
     try:
@@ -398,6 +549,7 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
                 phone_code_hash=data.phone_code_hash
             )
         except errors.SessionPasswordNeededError:
+            logger.info("sign_in requires 2FA phone=***{last4}", last4=data.phone_number[-4:])
             if data.password is None:
                 raise HTTPException(
                     status_code=401,
@@ -405,6 +557,7 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
                 )
             await client.sign_in(password=data.password)
     except errors.PasswordHashInvalidError:
+        logger.warning("sign_in invalid 2FA password phone=***{last4}", last4=data.phone_number[-4:])
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid 2FA password", "code": "invalid_password"},
@@ -412,10 +565,12 @@ async def sign_in(data: AuthSignIn) -> AuthSignInResponse:
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("sign_in failed phone=***{last4}", last4=data.phone_number[-4:])
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         if client.is_connected():
             await client.disconnect()
+    logger.info("sign_in succeeded phone=***{last4}", last4=data.phone_number[-4:])
     return AuthSignInResponse(session_string=client.session.save())
 
 @app.post("/auth/sign-in-session", response_model=AuthSignInSessionResponse)
@@ -444,11 +599,13 @@ async def sign_in_with_session(data: AuthSignInSessionRequest) -> AuthSignInSess
                    authorized (e.g. the session has been logged out or has
                    expired).
     """
+    logger.info("sign_in_session: validating session")
     client = None
     try:
         client = TelegramClient(StringSession(data.session_string), settings.API_ID, settings.API_HASH, proxy=_build_proxy(settings))
         await client.connect()
         authorized = await client.is_user_authorized()
+        logger.info("sign_in_session authorized={auth}", auth=authorized)
         if not authorized:
             raise HTTPException(
                 status_code=401,
@@ -457,10 +614,12 @@ async def sign_in_with_session(data: AuthSignInSessionRequest) -> AuthSignInSess
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("sign_in_session failed")
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         if client is not None and client.is_connected():
             await client.disconnect()
+    logger.info("sign_in_session succeeded")
     return AuthSignInSessionResponse(session_string=client.session.save())
 
 @app.post("/job")
@@ -489,16 +648,22 @@ async def create_messaging_job(job_data: MessagingJob, background_tasks: Backgro
           immediate rate limiting, with additional delays if FloodWaitError occurs.
     """
     job_id = str(uuid.uuid4())
-    
+
+    logger.info(
+        "create_messaging_job job_id={job_id} recipients={n}",
+        job_id=job_id,
+        n=len(job_data.usernames),
+    )
+
     # We pass the session_string directly into the worker
     background_tasks.add_task(
-        mass_messaging_task, 
-        job_id, 
-        job_data.session_string, 
-        job_data.usernames, 
+        mass_messaging_task,
+        job_id,
+        job_data.session_string,
+        job_data.usernames,
         job_data.message
     )
-    
+
     return {"job_id": job_id, "status": "Job started asynchronously"}
 
 @app.get("/job/{job_id}", response_model=JobStatus)
@@ -531,15 +696,21 @@ async def _qr_wait_task(qr_id: str, client: TelegramClient):
         await qr.wait()
         qr_logins[qr_id]["session_string"] = client.session.save()
         qr_logins[qr_id]["status"] = "success"
+        logger.info("_qr_wait_task status=success qr_id={qr_id}", qr_id=qr_id)
     except asyncio.TimeoutError:
         qr_logins[qr_id]["status"] = "expired"
+        logger.info("_qr_wait_task status=expired qr_id={qr_id}", qr_id=qr_id)
     except errors.SessionPasswordNeededError:
         qr_logins[qr_id]["status"] = "password_required"
+        logger.info("_qr_wait_task status=password_required qr_id={qr_id}", qr_id=qr_id)
     except Exception as e:
         qr_logins[qr_id]["status"] = "error"
         qr_logins[qr_id]["error"] = str(e)
+        logger.opt(exception=True).error(
+            "_qr_wait_task status=error qr_id={qr_id}", qr_id=qr_id
+        )
     finally:
-        if qr_logins[qr_id]["status"] != "password_required":
+        if qr_logins.get(qr_id, {}).get("status") != "password_required":
             try:
                 if client.is_connected():
                     await client.disconnect()
@@ -561,6 +732,7 @@ async def start_qr_login() -> AuthQrStartResponse:
         HTTPException:
             - 400: If Telegram refuses to issue a login token.
     """
+    logger.info("start_qr_login: requesting QR token")
     client = TelegramClient(
         StringSession(),
         settings.API_ID,
@@ -571,6 +743,7 @@ async def start_qr_login() -> AuthQrStartResponse:
     try:
         qr = await client.qr_login()
     except Exception as e:
+        logger.opt(exception=True).error("start_qr_login: qr_login failed")
         if client.is_connected():
             await client.disconnect()
         raise HTTPException(status_code=400, detail=str(e))
@@ -584,6 +757,7 @@ async def start_qr_login() -> AuthQrStartResponse:
         "error": None,
     }
     asyncio.create_task(_qr_wait_task(qr_id, client))
+    logger.info("start_qr_login: qr_id={qr_id}", qr_id=qr_id)
 
     return AuthQrStartResponse(qr_id=qr_id, qr_url=qr.url)
 
@@ -636,6 +810,7 @@ async def submit_qr_password(qr_id: str, data: AuthQrPasswordRequest):
             - 401: With code "invalid_password" if the password is wrong.
             - 400: For any other checkPassword failure.
     """
+    logger.info("submit_qr_password qr_id={qr_id}", qr_id=qr_id)
     entry = qr_logins.get(qr_id)
     if not entry:
         raise HTTPException(status_code=404, detail="QR login not found")
@@ -656,7 +831,9 @@ async def submit_qr_password(qr_id: str, data: AuthQrPasswordRequest):
         await client._on_login(result.user)
         entry["session_string"] = client.session.save()
         entry["status"] = "success"
+        logger.info("submit_qr_password succeeded qr_id={qr_id}", qr_id=qr_id)
     except errors.PasswordHashInvalidError:
+        logger.warning("submit_qr_password invalid 2FA qr_id={qr_id}", qr_id=qr_id)
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid 2FA password", "code": "invalid_password"},
@@ -664,6 +841,9 @@ async def submit_qr_password(qr_id: str, data: AuthQrPasswordRequest):
     except HTTPException:
         raise
     except Exception as e:
+        logger.opt(exception=True).error(
+            "submit_qr_password failed qr_id={qr_id}", qr_id=qr_id
+        )
         entry["status"] = "error"
         entry["error"] = str(e)
         raise HTTPException(status_code=400, detail=str(e))
