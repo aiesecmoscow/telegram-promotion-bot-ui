@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import List, Dict, Optional, Tuple, Literal
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
 from telethon import password as pwd_mod
@@ -301,10 +301,13 @@ class MessagingJob(BaseModel):
                               Telegram handle (e.g., "username" or "@username").
         message (str): The message text to send to all specified users.
                       Maximum length should comply with Telegram's message limits.
+        delay_seconds (float): Seconds to wait between successfully sent messages.
+                               Defaults to 20.0. Must be non-negative.
     """
     session_string: str
     usernames: List[str]
     message: str
+    delay_seconds: float = Field(20.0, ge=0)
 
 
 class RecipientResult(BaseModel):
@@ -352,7 +355,13 @@ class JobStatus(BaseModel):
 
 # --- Background Task ---
 
-async def mass_messaging_task(job_id: str, session: str, usernames: List[str], text: str):
+async def mass_messaging_task(
+    job_id: str,
+    session: str,
+    usernames: List[str],
+    text: str,
+    delay_seconds: float,
+):
     """
     Background task to send messages to multiple users with rate limit handling.
 
@@ -371,9 +380,10 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
         "error": None,
     }
     logger.info(
-        "mass_messaging_task job_id={job_id} total={total}",
+        "mass_messaging_task job_id={job_id} total={total} delay_seconds={delay_seconds}",
         job_id=job_id,
         total=len(usernames),
+        delay_seconds=delay_seconds,
     )
     proxy = _build_proxy(settings)
     client = None
@@ -395,7 +405,7 @@ async def mass_messaging_task(job_id: str, session: str, usernames: List[str], t
                     job_id=job_id,
                     recipient=username,
                 )
-                await asyncio.sleep(20)
+                await asyncio.sleep(delay_seconds)
             except errors.FloodWaitError as e:
                 logger.warning(
                     "job_id={job_id} recipient={recipient} flood_wait seconds={seconds}",
@@ -648,9 +658,10 @@ async def create_messaging_job(job_data: MessagingJob, background_tasks: Backgro
     job_id = str(uuid.uuid4())
 
     logger.info(
-        "create_messaging_job job_id={job_id} recipients={n}",
+        "create_messaging_job job_id={job_id} recipients={n} delay_seconds={delay_seconds}",
         job_id=job_id,
         n=len(job_data.usernames),
+        delay_seconds=job_data.delay_seconds,
     )
 
     # We pass the session_string directly into the worker
@@ -659,7 +670,8 @@ async def create_messaging_job(job_data: MessagingJob, background_tasks: Backgro
         job_id,
         job_data.session_string,
         job_data.usernames,
-        job_data.message
+        job_data.message,
+        job_data.delay_seconds,
     )
 
     return {"job_id": job_id, "status": "Job started asynchronously"}
