@@ -74,6 +74,7 @@ export async function createJob(data: {
   session_string: string;
   usernames: string[];
   message: string;
+  delay_seconds?: number;
 }) {
   const res = await fetch(`${BASE}/job`, {
     method: 'POST',

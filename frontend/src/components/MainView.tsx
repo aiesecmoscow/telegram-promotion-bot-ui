@@ -17,6 +17,7 @@ type MainViewProps = {
 
 const ACTIVE_JOB_KEY = 'tg_active_job_id';
 const MESSAGE_KEY = 'tg_message';
+const DELAY_KEY = 'tg_delay';
 const POLL_INTERVAL_MS = 2000;
 
 export default function MainView({
@@ -28,6 +29,12 @@ export default function MainView({
 }: MainViewProps) {
   const [usernames, setUsernames] = useState('');
   const [message, setMessage] = useState(() => localStorage.getItem(MESSAGE_KEY) ?? '');
+  const [delay, setDelay] = useState<number>(() => {
+    const raw = localStorage.getItem(DELAY_KEY);
+    if (raw === null) return 20;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 20;
+  });
   const [activeJobId, setActiveJobId] = useState<string | null>(
     () => localStorage.getItem(ACTIVE_JOB_KEY),
   );
@@ -36,6 +43,7 @@ export default function MainView({
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const isStartingRef = useRef(false);
   const messageMountedRef = useRef(false);
+  const delayMountedRef = useRef(false);
 
   const clearActiveJob = () => {
     localStorage.removeItem(ACTIVE_JOB_KEY);
@@ -117,6 +125,14 @@ export default function MainView({
     localStorage.setItem(MESSAGE_KEY, message);
   }, [message]);
 
+  useEffect(() => {
+    if (!delayMountedRef.current) {
+      delayMountedRef.current = true;
+      return;
+    }
+    localStorage.setItem(DELAY_KEY, String(delay));
+  }, [delay]);
+
   const handleStart = async () => {
     setError('');
     setPollError('');
@@ -143,10 +159,15 @@ export default function MainView({
         setError('Please enter a message');
         return;
       }
+      if (!Number.isFinite(delay) || delay < 0) {
+        setError('Delay must be a non-negative number');
+        return;
+      }
       const res = await createJob({
         session_string: session,
         usernames: list,
         message: message.trim(),
+        delay_seconds: delay,
       });
       localStorage.setItem(ACTIVE_JOB_KEY, res.job_id);
       setActiveJobId(res.job_id);
@@ -216,6 +237,19 @@ export default function MainView({
           rows={4}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
+        />
+      </label>
+      <label className="form-control w-full">
+        <div className="label">
+          <span className="label-text">Delay between messages (seconds)</span>
+        </div>
+        <input
+          type="number"
+          className="input input-bordered w-full"
+          min={0}
+          step={1}
+          value={delay}
+          onChange={(e) => setDelay(Number(e.target.value))}
         />
       </label>
       <button
