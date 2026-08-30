@@ -124,3 +124,53 @@ export async function getJobStatus(job_id: string): Promise<JobStatus> {
   }
   return res.json() as Promise<JobStatus>;
 }
+
+export async function startQrLogin(): Promise<{ qr_id: string; qr_url: string }> {
+  const res = await fetch(`${BASE}/auth/qr/start`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    throw parseError(detail, 'Failed to start QR login');
+  }
+  return res.json() as Promise<{ qr_id: string; qr_url: string }>;
+}
+
+export type QrStatus =
+  | { status: 'pending' }
+  | { status: 'password_required' }
+  | { status: 'success'; session_string: string }
+  | { status: 'expired' | 'error'; error?: string };
+
+export async function getQrStatus(qr_id: string): Promise<QrStatus> {
+  const res = await fetch(`${BASE}/auth/qr/${encodeURIComponent(qr_id)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    throw parseError(detail, 'Failed to fetch QR login status');
+  }
+  return res.json() as Promise<QrStatus>;
+}
+
+export async function submitQrPassword(
+  qr_id: string,
+  password: string,
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/auth/qr/${encodeURIComponent(qr_id)}/password`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = err.detail;
+    if (detail && typeof detail === 'object') {
+      const message = typeof detail.detail === 'string' ? detail.detail : '';
+      const code = typeof detail.code === 'string' ? detail.code : undefined;
+      throw new AuthError(message || 'Failed to submit QR password', code);
+    }
+    throw parseError(typeof detail === 'string' ? detail : '', 'Failed to submit QR password');
+  }
+}

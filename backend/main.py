@@ -3,8 +3,9 @@ import uuid
 from typing import List, Dict, Optional, Tuple, Literal
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, model_validator
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
+from telethon import password as pwd_mod
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import socks
 
@@ -56,6 +57,13 @@ app = FastAPI(title="AIESEC Moscow Telegram Unified Backend")
 # Store for job statuses (mutated in place by background tasks; rendered
 # into a JobStatus on each GET /job/{job_id} call).
 jobs_db: Dict[str, Dict] = {}
+
+# Store for in-flight Telegram QR login flows. A background task polls the
+# underlying TelegramClient (via QRLogin.wait()) and mutates the entry's
+# status; the GET endpoint evicts entries once a terminal status is returned.
+# When status is "password_required" the entry keeps the live client so the
+# password endpoint can complete the auth.checkPassword round-trip.
+qr_logins: Dict[str, Dict] = {}
 
 class AuthSendCode(BaseModel):
     """
@@ -134,6 +142,52 @@ class AuthSignInSessionResponse(BaseModel):
                              differ from the input.
     """
     session_string: str
+
+class AuthQrStartResponse(BaseModel):
+    """
+    Response model for starting a Telegram QR login flow.
+
+    Attributes:
+        qr_id (str): Server-side identifier the client uses to poll for status.
+        qr_url (str): The ``tg://login?token=...`` URL to encode into a QR
+                      code. Scanning this from another Telegram client will
+                      authorize the in-flight backend session.
+    """
+    qr_id: str
+    qr_url: str
+
+class AuthQrStatusResponse(BaseModel):
+    """
+    Response model for polling the status of a Telegram QR login flow.
+
+    Attributes:
+        status (Literal["pending", "password_required", "success", "expired", "error"]):
+            "pending" while waiting for the user to scan the QR;
+            "password_required" after the user has confirmed the QR scan on
+            another device but their account has 2FA enabled (the frontend
+            should prompt for the 2FA password and POST it back);
+            "success" once the user has confirmed on another device
+            (session_string is populated);
+            "expired" if the QR token expired before being scanned;
+            "error" for any other failure (error is populated).
+        session_string (Optional[str]): Authenticated StringSession when
+                                       status is "success"; None otherwise.
+        error (Optional[str]): Human-readable error message when status is
+                               "error"; None otherwise.
+    """
+    status: Literal["pending", "password_required", "success", "expired", "error"]
+    session_string: Optional[str] = None
+    error: Optional[str] = None
+
+class AuthQrPasswordRequest(BaseModel):
+    """
+    Request model for submitting the 2FA password to complete a Telegram
+    QR login flow whose status is "password_required".
+
+    Attributes:
+        password (str): The user's Telegram cloud (2FA) password.
+    """
+    password: str
 
 class MessagingJob(BaseModel):
     """
@@ -459,3 +513,164 @@ async def get_job_status(job_id: str):
     if not state:
         raise HTTPException(status_code=404, detail="Job not found")
     return JobStatus(job_id=job_id, **state)
+
+
+async def _qr_wait_task(qr_id: str, client: TelegramClient):
+    """
+    Background task that waits for a QR login to complete.
+
+    Mutates ``qr_logins[qr_id]`` in place with the terminal status. On any
+    outcome (success, expiry, error) the underlying TelegramClient is
+    disconnected so it does not linger in the server. ``password_required``
+    is a non-terminal status — the client must stay alive so a subsequent
+    POST to ``/auth/qr/{qr_id}/password`` can complete the auth.checkPassword
+    flow against the same session.
+    """
+    try:
+        qr = qr_logins[qr_id]["qr"]
+        await qr.wait()
+        qr_logins[qr_id]["session_string"] = client.session.save()
+        qr_logins[qr_id]["status"] = "success"
+    except asyncio.TimeoutError:
+        qr_logins[qr_id]["status"] = "expired"
+    except errors.SessionPasswordNeededError:
+        qr_logins[qr_id]["status"] = "password_required"
+    except Exception as e:
+        qr_logins[qr_id]["status"] = "error"
+        qr_logins[qr_id]["error"] = str(e)
+    finally:
+        if qr_logins[qr_id]["status"] != "password_required":
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+            except Exception:
+                pass
+
+
+@app.post("/auth/qr/start", response_model=AuthQrStartResponse)
+async def start_qr_login() -> AuthQrStartResponse:
+    """
+    Start a Telegram QR login flow.
+
+    Creates a fresh unauthorized TelegramClient, requests a login token via
+    ``auth.exportLoginToken``, stores the live client keyed by ``qr_id``, and
+    spawns a background task that waits for the user to confirm on another
+    device. The QR URL is returned for the caller to render as a QR code.
+
+    Raises:
+        HTTPException:
+            - 400: If Telegram refuses to issue a login token.
+    """
+    client = TelegramClient(
+        StringSession(),
+        settings.API_ID,
+        settings.API_HASH,
+        proxy=_build_proxy(settings),
+    )
+    await client.connect()
+    try:
+        qr = await client.qr_login()
+    except Exception as e:
+        if client.is_connected():
+            await client.disconnect()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    qr_id = str(uuid.uuid4())
+    qr_logins[qr_id] = {
+        "client": client,
+        "qr": qr,
+        "status": "pending",
+        "session_string": None,
+        "error": None,
+    }
+    asyncio.create_task(_qr_wait_task(qr_id, client))
+
+    return AuthQrStartResponse(qr_id=qr_id, qr_url=qr.url)
+
+
+@app.get("/auth/qr/{qr_id}", response_model=AuthQrStatusResponse)
+async def get_qr_status(qr_id: str) -> AuthQrStatusResponse:
+    """
+    Poll the status of a previously-started QR login flow.
+
+    On the first call that observes a terminal status (success/expired/error)
+    the entry is evicted so subsequent calls return 404. Pending calls are a
+    no-op against the entry.
+
+    Raises:
+        HTTPException:
+            - 404: If ``qr_id`` is unknown or has already been consumed.
+    """
+    entry = qr_logins.get(qr_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="QR login not found")
+
+    status = entry["status"]
+    if status == "success":
+        qr_logins.pop(qr_id, None)
+        return AuthQrStatusResponse(
+            status="success", session_string=entry["session_string"]
+        )
+    if status in ("expired", "error"):
+        qr_logins.pop(qr_id, None)
+        return AuthQrStatusResponse(status=status, error=entry["error"])
+    if status == "password_required":
+        return AuthQrStatusResponse(status="password_required")
+    return AuthQrStatusResponse(status="pending")
+
+
+@app.post("/auth/qr/{qr_id}/password")
+async def submit_qr_password(qr_id: str, data: AuthQrPasswordRequest):
+    """
+    Submit the 2FA password for a QR login flow whose status is
+    "password_required".
+
+    Completes the auth.checkPassword round-trip on the still-connected
+    TelegramClient, then marks the entry "success" so the next
+    GET /auth/qr/{qr_id} returns the authenticated session string.
+
+    Raises:
+        HTTPException:
+            - 404: If ``qr_id`` is unknown or has already been consumed.
+            - 400: If the flow is not in "password_required" state.
+            - 401: With code "invalid_password" if the password is wrong.
+            - 400: For any other checkPassword failure.
+    """
+    entry = qr_logins.get(qr_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="QR login not found")
+    if entry["status"] != "password_required":
+        raise HTTPException(
+            status_code=400,
+            detail=f"QR login is in state '{entry['status']}', not 'password_required'",
+        )
+
+    client: TelegramClient = entry["client"]
+    try:
+        pwd = await client(functions.account.GetPasswordRequest())
+        result = await client(
+            functions.auth.CheckPasswordRequest(
+                pwd_mod.compute_check(pwd, data.password)
+            )
+        )
+        await client._on_login(result.user)
+        entry["session_string"] = client.session.save()
+        entry["status"] = "success"
+    except errors.PasswordHashInvalidError:
+        raise HTTPException(
+            status_code=401,
+            detail={"detail": "Invalid 2FA password", "code": "invalid_password"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        entry["status"] = "error"
+        entry["error"] = str(e)
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception:
+            pass
+    return {"status": "ok"}
