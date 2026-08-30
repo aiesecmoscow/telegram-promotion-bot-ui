@@ -113,6 +113,42 @@ export async function sendMessage(username: string, message: string): Promise<vo
     await client.sendMessage(username, { message });
 }
 
+export function extractTelegramError(err: unknown): string {
+    if (err && typeof err === 'object') {
+        const e = err as { errorMessage?: unknown; code?: unknown; message?: unknown };
+        if (typeof e.errorMessage === 'string' && e.errorMessage.length > 0) {
+            return e.errorMessage;
+        }
+        if (typeof e.code === 'number') {
+            return `CODE_${e.code}`;
+        }
+        if (typeof e.message === 'string' && e.message.length > 0) {
+            return e.message;
+        }
+    }
+    if (typeof err === 'string' && err.length > 0) {
+        return err;
+    }
+    return 'UNKNOWN_ERROR';
+}
+
+export function extractFloodWaitSeconds(err: unknown): number | null {
+    if (err && typeof err === 'object') {
+        const e = err as { seconds?: unknown; errorMessage?: unknown };
+        if (typeof e.seconds === 'number' && Number.isFinite(e.seconds)) {
+            return e.seconds;
+        }
+        if (typeof e.errorMessage === 'string') {
+            const match = e.errorMessage.match(/^FLOOD_WAIT_(\d+)$/);
+            if (match && match[1]) {
+                const n = Number(match[1]);
+                if (Number.isFinite(n)) return n;
+            }
+        }
+    }
+    return null;
+}
+
 export function getClient(): TelegramClient | null {
     return client;
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import './MainPage.css';
 
 const API_URL = '/api';
@@ -12,12 +12,99 @@ interface Status {
   type: 'success' | 'error' | 'info';
 }
 
+interface RecipientResult {
+  username: string;
+  status: 'sent' | 'failed' | 'skipped';
+  error?: string;
+  attemptedAt?: string;
+  attempts: number;
+}
+
+interface Job {
+  id: string;
+  status: 'Processing' | 'Completed' | 'Failed';
+  errorMessage?: string;
+  total: number;
+  processed: number;
+  sent: number;
+  failed: number;
+  currentUsername?: string;
+  results: RecipientResult[];
+  createdAt: string;
+  finishedAt?: string;
+}
+
+const COLLAPSE_THRESHOLD = 10;
+
 function MainPage({ onLogout }: MainPageProps) {
   const [usernames, setUsernames] = useState('');
   const [message, setMessage] = useState('');
   const [cooldown, setCooldown] = useState('10');
-  const [isSending, setIsSending] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
+
+  const [activeJobId, setActiveJobId] = useState<string | null>(
+    () => localStorage.getItem('last_job_id')
+  );
+  const [job, setJob] = useState<Job | null>(null);
+
+  // Polling effect: refetch the current job on a 2s cadence while Processing,
+  // 10s cadence after Completed/Failed. Stops when activeJobId is cleared.
+  useEffect(() => {
+    if (!activeJobId) {
+      setJob(null);
+      return;
+    }
+
+    let cancelled = false;
+    let intervalId: number | null = null;
+    let currentDelay = 2000;
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`${API_URL}/job/${activeJobId}`);
+        if (cancelled) return;
+
+        if (res.status === 404) {
+          setActiveJobId(null);
+          localStorage.removeItem('last_job_id');
+          if (intervalId !== null) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+          return;
+        }
+        if (!res.ok) {
+          console.error('Failed to fetch job:', res.status);
+          return;
+        }
+
+        const data = (await res.json()) as Job;
+        if (cancelled) return;
+        setJob(data);
+
+        const nextDelay = data.status === 'Processing' ? 2000 : 10000;
+        if (nextDelay !== currentDelay) {
+          currentDelay = nextDelay;
+          if (intervalId !== null) {
+            clearInterval(intervalId);
+            intervalId = window.setInterval(tick, currentDelay);
+          }
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    };
+
+    tick();
+    intervalId = window.setInterval(tick, currentDelay);
+
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) clearInterval(intervalId);
+    };
+  }, [activeJobId]);
+
+  const isProcessing = job?.status === 'Processing';
 
   const handleSendMessages = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +125,6 @@ function MainPage({ onLogout }: MainPageProps) {
       return;
     }
 
-    setIsSending(true);
     setStatus({
       message: `Starting message sending to ${usernameList.length} users...`,
       type: 'info',
@@ -61,16 +147,52 @@ function MainPage({ onLogout }: MainPageProps) {
         throw new Error(data.error || 'Failed to send messages');
       }
 
-      setStatus({
-        message: `✓ Task started for ${data.totalUsers} users. Check the backend console for real-time progress.`,
-        type: 'success',
-      });
-    } catch (err: any) {
-      setStatus({ message: `✗ Error: ${err.message}`, type: 'error' });
-    } finally {
-      setIsSending(false);
+      const newJobId = data.jobId as string | undefined;
+      if (newJobId) {
+        setActiveJobId(newJobId);
+        localStorage.setItem('last_job_id', newJobId);
+        setStatus({
+          message: `Task started for ${data.totalUsers} users.`,
+          type: 'success',
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setStatus({ message: `✗ Error: ${msg}`, type: 'error' });
     }
   };
+
+  const handleClearResults = () => {
+    setActiveJobId(null);
+    setJob(null);
+    localStorage.removeItem('last_job_id');
+  };
+
+  const handleCopyList = async (
+    items: RecipientResult[],
+    withError: boolean
+  ) => {
+    const text = items
+      .map((r) => (withError ? `${r.username}\t${r.error ?? ''}` : r.username))
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus({
+        message: `Copied ${items.length} entries to clipboard`,
+        type: 'success',
+      });
+    } catch {
+      setStatus({ message: 'Failed to copy to clipboard', type: 'error' });
+    }
+  };
+
+  const sent = job?.results.filter((r) => r.status === 'sent') ?? [];
+  const failed = job?.results.filter((r) => r.status === 'failed') ?? [];
+  const skipped = job?.results.filter((r) => r.status === 'skipped') ?? [];
+
+  const submitLabel = isProcessing
+    ? `Sending… (${job?.sent ?? 0}/${job?.total ?? 0})`
+    : 'Start Sending';
 
   return (
     <div className="main-page">
@@ -99,7 +221,8 @@ function MainPage({ onLogout }: MainPageProps) {
                 required
               />
               <small className="help-text">
-                Enter Telegram usernames, one per line (with or without @)
+                Enter Telegram usernames, one per line (with or without @).
+                Keep lists reasonable (≤500 per send).
               </small>
             </div>
 
@@ -137,8 +260,12 @@ function MainPage({ onLogout }: MainPageProps) {
               </small>
             </div>
 
-            <button type="submit" disabled={isSending} className="send-btn">
-              {isSending ? 'Sending...' : 'Start Sending'}
+            <button
+              type="submit"
+              disabled={isProcessing}
+              className="send-btn"
+            >
+              {submitLabel}
             </button>
 
             {status && (
@@ -148,8 +275,192 @@ function MainPage({ onLogout }: MainPageProps) {
             )}
           </form>
         </div>
+
+        {job && (
+          <ResultsBlock
+            job={job}
+            sent={sent}
+            failed={failed}
+            skipped={skipped}
+            onClear={handleClearResults}
+            onCopyList={handleCopyList}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+interface ResultsBlockProps {
+  job: Job;
+  sent: RecipientResult[];
+  failed: RecipientResult[];
+  skipped: RecipientResult[];
+  onClear: () => void;
+  onCopyList: (items: RecipientResult[], withError: boolean) => void;
+}
+
+function ResultsBlock({
+  job,
+  sent,
+  failed,
+  skipped,
+  onClear,
+  onCopyList,
+}: ResultsBlockProps) {
+  return (
+    <div className="panel results-panel">
+      <div className="results-header">
+        <h2>Results</h2>
+        <button onClick={onClear} className="clear-btn">
+          Clear results
+        </button>
+      </div>
+
+      <div className="results-meta">
+        <span className={`status-pill status-${job.status.toLowerCase()}`}>
+          {job.status}
+        </span>
+        <span>
+          Processed: {job.processed}/{job.total}
+        </span>
+        <span>Sent: {job.sent}</span>
+        <span>Failed: {job.failed}</span>
+        {skipped.length > 0 && <span>Skipped: {skipped.length}</span>}
+      </div>
+
+      {job.status === 'Processing' && job.processed < job.total && (
+        <ProgressBar job={job} />
+      )}
+
+      {job.currentUsername && job.status === 'Processing' && (
+        <div className="current-target">
+          Sending now to: <strong>{job.currentUsername}</strong>
+        </div>
+      )}
+
+      {job.errorMessage && (
+        <div className="error-banner">
+          Job failed: <strong>{job.errorMessage}</strong>
+        </div>
+      )}
+
+      {job.status !== 'Processing' && (
+        <div className="results-summary">
+          Sent: <strong>{job.sent}</strong>, Failed:{' '}
+          <strong>{job.failed}</strong>
+          {skipped.length > 0 && (
+            <>
+              , Skipped: <strong>{skipped.length}</strong>
+            </>
+          )}
+        </div>
+      )}
+
+      {failed.length > 0 && (
+        <CollapsibleList
+          title={`Failed (${failed.length})`}
+          items={failed}
+          withError
+          onCopy={() => onCopyList(failed, true)}
+          copyLabel="Copy failed list"
+        />
+      )}
+
+      {sent.length > 0 && (
+        <CollapsibleList
+          title={`Sent (${sent.length})`}
+          items={sent}
+          withError={false}
+          onCopy={() => onCopyList(sent, false)}
+          copyLabel="Copy sent list"
+        />
+      )}
+
+      {skipped.length > 0 && (
+        <CollapsibleList
+          title={`Skipped (${skipped.length})`}
+          items={skipped}
+          withError
+          onCopy={() => onCopyList(skipped, true)}
+          copyLabel="Copy skipped list"
+        />
+      )}
+    </div>
+  );
+}
+
+interface ProgressBarProps {
+  job: Job;
+}
+
+function ProgressBar({ job }: ProgressBarProps) {
+  const total = Math.max(job.total, 1);
+  const sentPct = (job.sent / total) * 100;
+  const failedPct = (job.failed / total) * 100;
+  return (
+    <div className="progress">
+      <div
+        className="progress-segment progress-sent"
+        style={{ width: `${sentPct}%` }}
+      />
+      <div
+        className="progress-segment progress-failed"
+        style={{ width: `${failedPct}%` }}
+      />
+    </div>
+  );
+}
+
+interface CollapsibleListProps {
+  title: string;
+  items: RecipientResult[];
+  withError: boolean;
+  onCopy: () => void;
+  copyLabel: string;
+}
+
+function CollapsibleList({
+  title,
+  items,
+  withError,
+  onCopy,
+  copyLabel,
+}: CollapsibleListProps) {
+  const defaultOpen = items.length <= COLLAPSE_THRESHOLD;
+  return (
+    <details className="results-section" open={defaultOpen}>
+      <summary>
+        {title}
+        <button
+          type="button"
+          className="copy-btn"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onCopy();
+          }}
+        >
+          {copyLabel}
+        </button>
+      </summary>
+      <ul className="results-list">
+        {items.map((r, idx) => (
+          <li
+            key={`${r.username}-${idx}`}
+            className={`result-item result-${r.status}`}
+          >
+            <span className="result-username">{r.username}</span>
+            {withError && r.error && (
+              <span className="result-error"> — {r.error}</span>
+            )}
+            {r.attempts > 1 && (
+              <span className="result-attempts"> (attempts: {r.attempts})</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

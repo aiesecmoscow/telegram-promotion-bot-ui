@@ -126,6 +126,42 @@ app.get('/api/session', (req: Request, res: Response) => {
     }
 });
 
+// Хранилище активных и недавних job'ов рассылки
+type RecipientStatus = 'sent' | 'failed' | 'skipped';
+
+interface RecipientResult {
+    username: string;
+    status: RecipientStatus;
+    error?: string;
+    attemptedAt?: string;
+    attempts: number;
+}
+
+interface Job {
+    id: string;
+    status: 'Processing' | 'Completed' | 'Failed';
+    errorMessage?: string;
+    total: number;
+    processed: number;
+    sent: number;
+    failed: number;
+    currentUsername?: string;
+    results: RecipientResult[];
+    createdAt: string;
+    finishedAt?: string;
+}
+
+const jobs = new Map<string, Job>();
+
+function gcOldJobs() {
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    for (const [id, j] of jobs) {
+        if (j.finishedAt && Date.parse(j.finishedAt) < cutoff) {
+            jobs.delete(id);
+        }
+    }
+}
+
 // API для запуска рассылки сообщений
 app.post('/api/send-messages', async (req: Request<{}, {}, SendMessagesRequest>, res: Response) => {
     try {
@@ -139,23 +175,57 @@ app.post('/api/send-messages', async (req: Request<{}, {}, SendMessagesRequest>,
             return res.status(400).json({ error: 'message is required' });
         }
 
-        // Отправляем сообщение о начале рассылки
+        gcOldJobs();
+
+        const jobId = crypto.randomUUID();
+        const job: Job = {
+            id: jobId,
+            status: 'Processing',
+            total: usernames.length,
+            processed: 0,
+            sent: 0,
+            failed: 0,
+            results: [],
+            createdAt: new Date().toISOString(),
+        };
+        jobs.set(jobId, job);
+
         res.json({
-            success: true,
-            message: 'Messages sending started',
-            totalUsers: usernames.length
+            jobId,
+            status: 'Processing',
+            totalUsers: usernames.length,
         });
 
-        // Запускаем рассылку асинхронно
-        sendMessagesAsync(usernames, message, cooldownSeconds || 10);
+        sendMessagesAsync(jobId, usernames, message, cooldownSeconds || 10);
     } catch (error: any) {
         console.error('Error sending messages:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// API для получения состояния job'а рассылки
+app.get('/api/job/:jobId', (req: Request, res: Response) => {
+    const jobId = req.params.jobId;
+    if (!jobId) {
+        return res.status(404).json({ error: 'Job not found' });
+    }
+    const job = jobs.get(jobId);
+    if (!job) {
+        return res.status(404).json({ error: 'Job not found' });
+    }
+    res.json(job);
+});
+
 // Функция для асинхронной отправки сообщений
-async function sendMessagesAsync(usernames: string[], message: string, cooldownSeconds: number) {
+async function sendMessagesAsync(
+    jobId: string,
+    usernames: string[],
+    message: string,
+    cooldownSeconds: number
+) {
+    const job = jobs.get(jobId);
+    if (!job) return;
+
     for (let i = 0; i < usernames.length; i++) {
         const username = usernames[i];
 
@@ -164,32 +234,114 @@ async function sendMessagesAsync(usernames: string[], message: string, cooldownS
             continue;
         }
 
+        job.currentUsername = username;
+
+        let attempts = 0;
+        let sent = false;
+        let failedError: string | null = null;
+        let fatalError: string | null = null;
+
         try {
+            attempts++;
             console.log(`[${i + 1}/${usernames.length}] Sending message to ${username}...`);
             await telegram.sendMessage(username, message);
             console.log(`✓ Message sent to ${username}`);
+            sent = true;
+        } catch (err: unknown) {
+            const errCode = telegram.extractTelegramError(err);
 
-            // Ждем указанное время перед отправкой следующего сообщения (кроме последнего)
-            if (i < usernames.length - 1) {
-                console.log(`Waiting ${cooldownSeconds} seconds before next message...`);
-                await sleep(cooldownSeconds * 1000);
+            if (
+                errCode === 'USER_BANNED' ||
+                errCode === 'SESSION_REVOKED' ||
+                errCode.startsWith('AUTH_KEY_')
+            ) {
+                fatalError = errCode;
+            } else if (errCode.startsWith('FLOOD_WAIT_')) {
+                const seconds = telegram.extractFloodWaitSeconds(err);
+                if (attempts < 2 && seconds !== null) {
+                    console.log(`⏳ Flood wait ${seconds}s, retrying ${username}...`);
+                    await sleep(seconds * 1000);
+                    try {
+                        attempts++;
+                        await telegram.sendMessage(username, message);
+                        console.log(`✓ Message sent to ${username} (retry)`);
+                        sent = true;
+                    } catch (err2: unknown) {
+                        failedError = telegram.extractTelegramError(err2);
+                    }
+                } else {
+                    failedError = errCode;
+                }
+            } else {
+                failedError = errCode;
             }
-        } catch (error: any) {
-            console.error(`✗ Error sending message to ${username}:`, error.message);
+        }
 
-            // Проверяем на бан или ограничения
-            if (error.message.includes('FLOOD') || error.message.includes('SLOWMODE')) {
-                console.error('⚠️ RATE LIMIT detected. You may be sending messages too fast.');
-            } else if (error.message.includes('USER_BANNED')) {
-                console.error('⚠️ ACCOUNT BANNED. Cannot send messages.');
-                break; // Прекращаем рассылку при бане
-            } else if (error.message.includes('AUTH_KEY')) {
-                console.error('⚠️ SESSION EXPIRED. Please re-authenticate.');
-                break;
+        if (fatalError !== null) {
+            console.error(`✗ Fatal error on ${username}: ${fatalError}. Stopping job.`);
+            job.results.push({
+                username,
+                status: 'skipped',
+                error: fatalError,
+                attempts,
+            });
+            for (let j = i + 1; j < usernames.length; j++) {
+                const u = usernames[j];
+                if (u) {
+                    job.results.push({
+                        username: u,
+                        status: 'skipped',
+                        error: fatalError,
+                        attempts: 0,
+                    });
+                    job.processed++;
+                }
             }
+            job.status = 'Failed';
+            job.errorMessage = fatalError;
+            job.finishedAt = new Date().toISOString();
+            delete job.currentUsername;
+            jobs.set(jobId, { ...job });
+            return;
+        }
+
+        if (sent) {
+            job.results.push({
+                username,
+                status: 'sent',
+                attempts,
+                attemptedAt: new Date().toISOString(),
+            });
+            job.sent++;
+        } else {
+            const errorMsg = failedError ?? 'UNKNOWN_ERROR';
+            job.results.push({
+                username,
+                status: 'failed',
+                error: errorMsg,
+                attempts,
+                attemptedAt: new Date().toISOString(),
+            });
+            job.failed++;
+        }
+        job.processed++;
+        delete job.currentUsername;
+
+        // Периодически сбрасываем обновлённый job в Map, чтобы ссылки оставались свежими
+        if (job.results.length % 20 === 0) {
+            jobs.set(jobId, { ...job });
+        }
+
+        if (i < usernames.length - 1) {
+            console.log(`Waiting ${cooldownSeconds} seconds before next message...`);
+            await sleep(cooldownSeconds * 1000);
         }
     }
 
+    job.status = 'Completed';
+    job.finishedAt = new Date().toISOString();
+    delete job.currentUsername;
+    jobs.set(jobId, { ...job });
     console.log('✓ Message sending completed');
 }
 
