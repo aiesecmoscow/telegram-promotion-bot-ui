@@ -1,5 +1,10 @@
-import { useState, useEffect } from 'react';
-import { createJob } from '../api';
+import { useState, useEffect, useRef } from 'react';
+import {
+  createJob,
+  getJobStatus,
+  JobNotFoundError,
+  type JobStatus,
+} from '../api';
 
 type MainViewProps = {
   session: string;
@@ -10,6 +15,9 @@ type MainViewProps = {
   onLogout: () => void;
 };
 
+const ACTIVE_JOB_KEY = 'tg_active_job_id';
+const POLL_INTERVAL_MS = 2000;
+
 export default function MainView({
   session,
   loading,
@@ -19,8 +27,79 @@ export default function MainView({
 }: MainViewProps) {
   const [usernames, setUsernames] = useState('');
   const [message, setMessage] = useState('');
-  const [jobStatus, setJobStatus] = useState('');
+  const [activeJobId, setActiveJobId] = useState<string | null>(
+    () => localStorage.getItem(ACTIVE_JOB_KEY),
+  );
+  const [job, setJob] = useState<JobStatus | null>(null);
+  const [pollError, setPollError] = useState('');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const isStartingRef = useRef(false);
+
+  const clearActiveJob = () => {
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    setActiveJobId(null);
+    setJob(null);
+  };
+
+  useEffect(() => {
+    if (!activeJobId) {
+      setJob(null);
+      return;
+    }
+    let cancelled = false;
+
+    const fetchOnce = async () => {
+      try {
+        const status = await getJobStatus(activeJobId);
+        if (cancelled) return;
+        setJob(status);
+        setPollError('');
+        if (status.status !== 'Processing') {
+          return true;
+        }
+        return false;
+      } catch (e: unknown) {
+        if (cancelled) return;
+        if (e instanceof JobNotFoundError) {
+          setPollError('Job lost on server (server restart?). Local lock cleared.');
+          clearActiveJob();
+          return true;
+        }
+        setPollError(
+          e instanceof Error ? e.message : 'Failed to fetch job status',
+        );
+        return false;
+      }
+    };
+
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+
+    const stop = () => {
+      stopped = true;
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    void (async () => {
+      const done = await fetchOnce();
+      if (stopped || done || cancelled) return;
+      intervalId = setInterval(async () => {
+        const finished = await fetchOnce();
+        if (finished && intervalId !== null) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      }, POLL_INTERVAL_MS);
+    })();
+
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, [activeJobId]);
 
   useEffect(() => {
     if (copyState === 'idle') return;
@@ -30,7 +109,16 @@ export default function MainView({
 
   const handleStart = async () => {
     setError('');
-    setJobStatus('');
+    setPollError('');
+    if (activeJobId && job?.status === 'Processing') {
+      setError('A job is already running. Wait or force-reset it.');
+      return;
+    }
+    if (activeJobId && !isStartingRef.current) {
+      clearActiveJob();
+    }
+    if (isStartingRef.current) return;
+    isStartingRef.current = true;
     setLoading(true);
     try {
       const list = usernames
@@ -50,12 +138,24 @@ export default function MainView({
         usernames: list,
         message: message.trim(),
       });
-      setJobStatus(`Job created! ID: ${res.job_id} — Status: ${res.status}`);
+      localStorage.setItem(ACTIVE_JOB_KEY, res.job_id);
+      setActiveJobId(res.job_id);
+      setJob(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setLoading(false);
+      isStartingRef.current = false;
     }
+  };
+
+  const handleForceReset = () => {
+    const ok = window.confirm(
+      'Force reset the local lock? The server-side job may still be running — this only unlocks the UI on this client.',
+    );
+    if (!ok) return;
+    clearActiveJob();
+    setPollError('');
   };
 
   const handleCopySession = async () => {
@@ -79,6 +179,9 @@ export default function MainView({
       setCopyState('failed');
     }
   };
+
+  const isLocked = !!activeJobId && job?.status === 'Processing';
+  const showResults = !!activeJobId;
 
   return (
     <div className="flex flex-col gap-4">
@@ -108,19 +211,95 @@ export default function MainView({
       <button
         className="btn btn-primary w-full"
         onClick={handleStart}
-        disabled={loading}
+        disabled={loading || isLocked}
       >
         {loading ? (
           <span className="loading loading-spinner loading-md"></span>
+        ) : isLocked ? (
+          'Locked — job in progress'
         ) : (
           'Start'
         )}
       </button>
-      {jobStatus && (
-        <div role="alert" className="alert alert-success">
-          {jobStatus}
+      {isLocked && (
+        <div role="alert" className="alert alert-warning">
+          <span>
+            A job is currently running. Wait for it to finish, or force-reset
+            below.
+          </span>
         </div>
       )}
+
+      {showResults && job && (
+        <div className="flex flex-col gap-2 border border-base-300 rounded-box p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="font-semibold">Job results</div>
+            <span
+              className={`badge ${
+                job.status === 'Completed'
+                  ? 'badge-success'
+                  : job.status === 'Failed'
+                    ? 'badge-error'
+                    : 'badge-info'
+              }`}
+            >
+              {job.status}
+            </span>
+          </div>
+          <div className="text-sm opacity-80">
+            sent {job.sent} / {job.total} · failed {job.failed}
+            {job.status === 'Processing' && job.current
+              ? ` · current: ${job.current}`
+              : ''}
+          </div>
+          {job.error && (
+            <div className="text-sm text-error">job error: {job.error}</div>
+          )}
+          {job.results.length > 0 && (
+            <ul className="flex flex-col gap-1 max-h-64 overflow-y-auto">
+              {job.results.map((r) => (
+                <li
+                  key={`${r.recipient}-${job.results.indexOf(r)}`}
+                  className="flex items-center gap-2 text-sm"
+                >
+                  <span
+                    className={`badge ${
+                      r.status === 'sent' ? 'badge-success' : 'badge-error'
+                    }`}
+                  >
+                    {r.status === 'sent' ? '✓' : '✗'}
+                  </span>
+                  <span className="font-mono">{r.recipient}</span>
+                  {r.error && (
+                    <span className="opacity-70">— {r.error}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            className="btn btn-ghost btn-sm self-end"
+            onClick={handleForceReset}
+            disabled={loading}
+          >
+            Force reset
+          </button>
+        </div>
+      )}
+
+      {showResults && !job && !pollError && (
+        <div className="flex items-center gap-2 text-sm opacity-80">
+          <span className="loading loading-spinner loading-xs"></span>
+          Loading job status…
+        </div>
+      )}
+
+      {pollError && (
+        <div role="alert" className="alert alert-warning">
+          <span>{pollError}</span>
+        </div>
+      )}
+
       <button
         className="btn btn-ghost btn-sm self-center"
         onClick={handleCopySession}

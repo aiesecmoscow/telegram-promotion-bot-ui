@@ -87,3 +87,40 @@ export async function createJob(data: {
   }
   return res.json() as Promise<{ job_id: string; status: string }>;
 }
+
+export type RecipientResult = {
+  recipient: string;
+  status: 'sent' | 'failed';
+  error: string | null;
+};
+
+export type JobStatus = {
+  job_id: string;
+  status: 'Processing' | 'Completed' | 'Failed';
+  total: number;
+  sent: number;
+  failed: number;
+  current: string | null;
+  results: RecipientResult[];
+  error: string | null;
+};
+
+export class JobNotFoundError extends Error {
+  constructor() {
+    super('Job not found');
+    this.name = 'JobNotFoundError';
+  }
+}
+
+export async function getJobStatus(job_id: string): Promise<JobStatus> {
+  const res = await fetch(`${BASE}/job/${encodeURIComponent(job_id)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof err.detail === 'string' ? err.detail : '';
+    if (res.status === 404 && detail === 'Job not found') {
+      throw new JobNotFoundError();
+    }
+    throw parseError(detail, 'Failed to fetch job status');
+  }
+  return res.json() as Promise<JobStatus>;
+}

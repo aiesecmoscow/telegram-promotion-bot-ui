@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Literal
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, model_validator
 from telethon import TelegramClient, errors
@@ -53,8 +53,9 @@ def _build_proxy(cfg: Settings) -> Optional[Tuple]:
 
 app = FastAPI(title="AIESEC Moscow Telegram Unified Backend")
 
-# Store for job statuses
-jobs_db: Dict[str, str] = {}
+# Store for job statuses (mutated in place by background tasks; rendered
+# into a JobStatus on each GET /job/{job_id} call).
+jobs_db: Dict[str, Dict] = {}
 
 class AuthSendCode(BaseModel):
     """
@@ -137,11 +138,11 @@ class AuthSignInSessionResponse(BaseModel):
 class MessagingJob(BaseModel):
     """
     Request model for creating a mass messaging job.
-    
+
     Attributes:
         session_string (str): Authenticated session string from sign-in endpoint.
-        usernames (List[str]): List of Telegram usernames or phone numbers to send 
-                              messages to. Each username should be a valid 
+        usernames (List[str]): List of Telegram usernames or phone numbers to send
+                              messages to. Each username should be a valid
                               Telegram handle (e.g., "username" or "@username").
         message (str): The message text to send to all specified users.
                       Maximum length should comply with Telegram's message limits.
@@ -150,51 +151,119 @@ class MessagingJob(BaseModel):
     usernames: List[str]
     message: str
 
+
+class RecipientResult(BaseModel):
+    """
+    Per-recipient result of a messaging job.
+
+    Attributes:
+        recipient (str): Username (or phone number) this result refers to.
+        status (Literal["sent", "failed"]): Outcome for this recipient.
+        error (Optional[str]): Name of the exception class (e.g.
+                               "UsernameNotOccupiedError") when status is "failed".
+                               None when status is "sent".
+    """
+    recipient: str
+    status: Literal["sent", "failed"]
+    error: Optional[str] = None
+
+
+class JobStatus(BaseModel):
+    """
+    Full job status returned by GET /job/{job_id}.
+
+    Attributes:
+        job_id (str): Unique identifier of the job.
+        status (Literal["Processing", "Completed", "Failed"]): Job-level state.
+        total (int): Total number of recipients in the job.
+        sent (int): Number of recipients successfully contacted so far.
+        failed (int): Number of recipients that failed so far.
+        current (Optional[str]): Username currently being processed; None when
+                                 the job is not actively processing.
+        results (List[RecipientResult]): Per-recipient outcomes, appended in the
+                                         order they were processed.
+        error (Optional[str]): Job-level error class name (e.g. "AuthKeyError")
+                               when status is "Failed"; None otherwise.
+    """
+    job_id: str
+    status: Literal["Processing", "Completed", "Failed"]
+    total: int
+    sent: int
+    failed: int
+    current: Optional[str] = None
+    results: List[RecipientResult]
+    error: Optional[str] = None
+
+
 # --- Background Task ---
 
 async def mass_messaging_task(job_id: str, session: str, usernames: List[str], text: str):
     """
     Background task to send messages to multiple users with rate limit handling.
-    
-    This function runs asynchronously in the background and handles Telegram's
-    rate limiting (FloodWaitError) by automatically pausing and resuming
-    message sending as needed.
-    
-    Args:
-        job_id (str): Unique identifier for tracking the messaging job status.
-        session (str): Serialized Telegram client session string.
-        usernames (List[str]): List of usernames to send messages to.
-        text (str): Message text to send to all users.
-        
-    Updates:
-        jobs_db (Dict[str, str]): Updates job status in the global job store:
-            - "Processing": Job is actively sending messages
-            - "Completed": All messages sent successfully
-            - "Failed: {error}": Job failed with specific error message
+
+    Updates jobs_db[job_id] in place with per-recipient results and a job-level
+    status. FloodWaitError is treated as a transparent retry (not a failure):
+    after sleeping we re-attempt the same recipient; a second exception there
+    is then recorded as a failure with the exception class name.
     """
-    jobs_db[job_id] = "Processing"
+    jobs_db[job_id] = {
+        "status": "Processing",
+        "total": len(usernames),
+        "sent": 0,
+        "failed": 0,
+        "current": None,
+        "results": [],
+        "error": None,
+    }
     proxy = _build_proxy(settings)
+    client = None
 
     try:
-        # Initialize client with the provided session string
         client = TelegramClient(StringSession(session), settings.API_ID, settings.API_HASH, proxy=proxy)
         await client.connect()
-        
+
         for username in usernames:
+            jobs_db[job_id]["current"] = username
             try:
                 await client.send_message(username, text)
-                # Small sleep to avoid immediate FloodWait
-                await asyncio.sleep(20) 
+                jobs_db[job_id]["results"].append(
+                    {"recipient": username, "status": "sent", "error": None}
+                )
+                jobs_db[job_id]["sent"] += 1
+                await asyncio.sleep(20)
             except errors.FloodWaitError as e:
                 await asyncio.sleep(e.seconds)
-                await client.send_message(username, text)
+                try:
+                    await client.send_message(username, text)
+                    jobs_db[job_id]["results"].append(
+                        {"recipient": username, "status": "sent", "error": None}
+                    )
+                    jobs_db[job_id]["sent"] += 1
+                except Exception as retry_e:
+                    jobs_db[job_id]["results"].append(
+                        {
+                            "recipient": username,
+                            "status": "failed",
+                            "error": type(retry_e).__name__,
+                        }
+                    )
+                    jobs_db[job_id]["failed"] += 1
             except Exception as e:
-                print(f"Failed to send to {username}: {e}")
+                jobs_db[job_id]["results"].append(
+                    {
+                        "recipient": username,
+                        "status": "failed",
+                        "error": type(e).__name__,
+                    }
+                )
+                jobs_db[job_id]["failed"] += 1
 
-        jobs_db[job_id] = "Completed"
+        jobs_db[job_id]["status"] = "Completed"
     except Exception as e:
-        jobs_db[job_id] = f"Failed: {str(e)}"
+        jobs_db[job_id]["status"] = "Failed"
+        jobs_db[job_id]["error"] = type(e).__name__
     finally:
+        jobs_db[job_id]["current"] = None
         if client and client.is_connected():
             await client.disconnect()
 
@@ -378,33 +447,15 @@ async def create_messaging_job(job_data: MessagingJob, background_tasks: Backgro
     
     return {"job_id": job_id, "status": "Job started asynchronously"}
 
-@app.get("/job/{job_id}")
+@app.get("/job/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str):
     """
     Retrieve the current status of a messaging job.
-    
-    Check the progress or completion status of a previously created 
-    messaging job using its unique job identifier.
-    
-    Args:
-        job_id (str): Unique identifier of the messaging job returned by 
-                     the create_messaging_job endpoint.
-                     
-    Returns:
-        dict: Contains job_id and current status. Possible status values:
-              - "Processing": Job is actively sending messages
-              - "Completed": All messages have been sent successfully
-              - "Failed: {error}": Job failed with the specified error message
-              
-    Raises:
-        HTTPException:
-            - 404: If the job_id does not exist or has been cleaned up
-            
-    Note:
-        Job status is stored in memory and may be lost if the server restarts.
-        For production use, consider implementing persistent job storage.
+
+    Returns the full JobStatus object including per-recipient results.
+    The job state is stored in memory and may be lost if the server restarts.
     """
-    status = jobs_db.get(job_id)
-    if not status:
+    state = jobs_db.get(job_id)
+    if not state:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"job_id": job_id, "status": status}
+    return JobStatus(job_id=job_id, **state)
