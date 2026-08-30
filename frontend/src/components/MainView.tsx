@@ -16,6 +16,7 @@ type MainViewProps = {
 };
 
 const ACTIVE_JOB_KEY = 'tg_active_job_id';
+const MESSAGE_KEY = 'tg_message';
 const POLL_INTERVAL_MS = 2000;
 
 export default function MainView({
@@ -26,7 +27,7 @@ export default function MainView({
   onLogout,
 }: MainViewProps) {
   const [usernames, setUsernames] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(() => localStorage.getItem(MESSAGE_KEY) ?? '');
   const [activeJobId, setActiveJobId] = useState<string | null>(
     () => localStorage.getItem(ACTIVE_JOB_KEY),
   );
@@ -34,6 +35,7 @@ export default function MainView({
   const [pollError, setPollError] = useState('');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const isStartingRef = useRef(false);
+  const messageMountedRef = useRef(false);
 
   const clearActiveJob = () => {
     localStorage.removeItem(ACTIVE_JOB_KEY);
@@ -106,6 +108,14 @@ export default function MainView({
     const t = setTimeout(() => setCopyState('idle'), 1500);
     return () => clearTimeout(t);
   }, [copyState]);
+
+  useEffect(() => {
+    if (!messageMountedRef.current) {
+      messageMountedRef.current = true;
+      return;
+    }
+    localStorage.setItem(MESSAGE_KEY, message);
+  }, [message]);
 
   const handleStart = async () => {
     setError('');
@@ -221,14 +231,6 @@ export default function MainView({
           'Start'
         )}
       </button>
-      {isLocked && (
-        <div role="alert" className="alert alert-warning">
-          <span>
-            A job is currently running. Wait for it to finish, or force-reset
-            below.
-          </span>
-        </div>
-      )}
 
       {showResults && job && (
         <div className="flex flex-col gap-2 border border-base-300 rounded-box p-4">

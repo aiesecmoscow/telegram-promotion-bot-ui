@@ -282,7 +282,7 @@ export default function Auth({
           <div className="divider text-xs">or</div>
           <button
             type="button"
-            className="btn btn-ghost btn-sm self-center"
+            className="btn btn-primary w-full"
             onClick={handleStartQr}
             disabled={loading}
           >
