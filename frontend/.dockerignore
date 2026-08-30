@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+index.css
+.git
+.git/**
+.kilo
+.kilo/**
+.env
+.env.*
+.DS_Store
+*.log
