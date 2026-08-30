@@ -1,6 +1,7 @@
 services:
   backend:
-    build: ./backend
+    image: ghcr.io/aiesecmoscow/telegram-promotion-bot-ui/backend
+    # build: ./backend
     expose: [ 8000 ]
     environment:
       - API_ID=${API_ID}
@@ -16,7 +17,8 @@ services:
       - "traefik.http.routers.promotion-bot.rule=Host(`promotion-bot.aiesecmoscow.whaleharbor.net`)"
       - "traefik.http.routers.promotion-bot.entrypoints=websecure"
       - "traefik.http.routers.promotion-bot.tls.certresolver=myresolver"
-    build: ./frontend
+    image: ghcr.io/aiesecmoscow/telegram-promotion-bot-ui/frontend
+    # build: ./frontend
     ports:
       - "8088:8080"
     environment:

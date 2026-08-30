@@ -27,7 +27,7 @@ class InterceptHandler(logging.Handler):
 
 
 _STRING_SESSION_RE = re.compile(r"[A-Za-z0-9+/=_-]{100,}")
-_SECRET_KEYS = ("session_string", "phone_code_hash", "password", "api_hash")
+_SECRET_KEYS = ("session_string", "phone_code_hash", "password", "api_hash", "api_id")
 
 
 def _redact_message(msg: str) -> str:
@@ -86,11 +86,9 @@ logging.basicConfig(handlers=[InterceptHandler()], level=0)
 logging.getLogger().addHandler(InterceptHandler())
 
 
-# REDACTED_SESSION=
-
 class Settings(BaseSettings):
-    API_ID: int = REDACTED
-    API_HASH: str = "REDACTED"
+    API_ID: int
+    API_HASH: str
     SOCKS5_HOST: str = ""
     SOCKS5_PORT: int = 0
     SOCKS5_USERNAME: Optional[str] = None

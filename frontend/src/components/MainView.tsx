@@ -197,7 +197,7 @@ export default function MainView({
     <div className="flex flex-col gap-4">
       <label className="form-control w-full">
         <div className="label">
-          <span className="label-text">Usernames (one per line)</span>
+          <span className="label-text">Usernames or links (one per line)</span>
         </div>
         <textarea
           className="textarea textarea-bordered w-full"
